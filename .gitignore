@@ -21,3 +21,6 @@ __screenshots__
 
 # tsdown
 .tsbuildinfo
+
+# pnpm pack output
+*.tgz
