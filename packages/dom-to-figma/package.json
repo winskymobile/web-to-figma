@@ -30,16 +30,24 @@
   },
   "publishConfig": {
     "access": "public",
-    "provenance": true
+    "provenance": true,
+    "exports": {
+      ".": {
+        "types": "./dist/figma.d.mts",
+        "import": "./dist/figma.mjs"
+      }
+    },
+    "main": "./dist/figma.mjs",
+    "types": "./dist/figma.d.mts"
   },
   "exports": {
     ".": {
-      "types": "./dist/figma.d.mts",
-      "import": "./dist/figma.mjs"
+      "types": "./src/figma.ts",
+      "import": "./src/figma.ts"
     }
   },
-  "main": "./dist/figma.mjs",
-  "types": "./dist/figma.d.mts",
+  "main": "./src/figma.ts",
+  "types": "./src/figma.ts",
   "files": [
     "dist",
     "README.md",
