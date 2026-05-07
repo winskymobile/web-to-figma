@@ -37,7 +37,10 @@ export async function elementToImageNodeChange(
   const opacity = parseOpacity(computedStyle.opacity);
 
   // Parse border information (includes border radius)
-  const borderProperties = parseBorderFromComputedStyle(computedStyle);
+  const borderProperties = parseBorderFromComputedStyle(computedStyle, {
+    width,
+    height,
+  });
 
   const { hash, bytes } = await imageCache.get(element);
   const blobIndex = registerBlob({ bytes });
