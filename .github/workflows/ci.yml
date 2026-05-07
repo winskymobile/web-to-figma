@@ -28,6 +28,15 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Resolve Playwright version
+        run: echo "PLAYWRIGHT_VERSION=$(pnpm --filter @sleekdesign/dom-to-figma exec playwright --version | awk '{print $2}')" >> "$GITHUB_ENV"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ env.PLAYWRIGHT_VERSION }}
+
       - name: Install Playwright browsers
         run: pnpm --filter @sleekdesign/dom-to-figma exec playwright install chromium --with-deps
 
