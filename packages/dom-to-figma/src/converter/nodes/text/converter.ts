@@ -402,10 +402,16 @@ export async function nodeToTextNodeChange(
           key: {
             family: loadedFont.properties.family,
             style: loadedFont.fontStyleName,
-            postscript: loadedFont.postScriptName,
+            // Figma writes its FontMetaData entries with an empty postscript
+            // even when the top-level fontName carries one. Match that so a
+            // round-trip looks identical and Figma's font matching (which is
+            // by family + style + weight) takes the same path on both sides.
+            postscript: "",
           },
-          fontLineHeight: styles.lineHeight,
-          fontDigest: loadedFont.fontDigest,
+          // Intrinsic line-height ratio of the font, NOT the user's chosen
+          // line-height in pixels. The user's line-height already lives on
+          // `nc.lineHeight` above. See `FontMetrics.lineHeightRatio`.
+          fontLineHeight: loadedFont.metrics.lineHeightRatio,
           fontStyle: loadedFont.actualItalic
             ? ("ITALIC" as const)
             : ("NORMAL" as const),
@@ -497,11 +503,23 @@ export async function nodeToTextNodeChange(
     }),
 
     /* Other */
+    // CSS `font-variant-ligatures: normal` (the default) enables common and
+    // contextual ligatures only. Discretionary and historical ligatures are
+    // off unless the author opts in — match that here.
     fontVariantCommonLigatures: true,
     fontVariantContextualLigatures: true,
-    fontVariantDiscretionaryLigatures: true,
+    fontVariantDiscretionaryLigatures: false,
     fontVersion: "2",
     textUserLayoutVersion: 4,
+    textExplicitLayoutVersion: 1,
+    textBidiVersion: 1,
+    // Note: we deliberately do not emit `textAutoResize`. The right value
+    // depends on whether the source DOM wrapped (`HEIGHT` — lock width,
+    // grow height) or rendered on a single line (`WIDTH_AND_HEIGHT` is
+    // safe). Emitting `WIDTH_AND_HEIGHT` unconditionally causes Figma to
+    // un-wrap multi-line text on re-derivation and clip it against the
+    // parent frame. Leaving the field unset gives Figma its default (NONE),
+    // which preserves whatever we measured.
     autoRename: true,
   };
 
