@@ -1,0 +1,36 @@
+{
+  "name": "extension",
+  "description": "Copy any website to Figma — browser extension built on @sleekdesign/dom-to-figma.",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build",
+    "build:firefox": "wxt build -b firefox",
+    "zip": "wxt zip",
+    "zip:firefox": "wxt zip -b firefox",
+    "check-types": "wxt prepare && tsc --noEmit",
+    "postinstall": "wxt prepare"
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "2.1.10",
+    "@sleekdesign/dom-to-figma": "workspace:*",
+    "@sleekdesign/ui": "workspace:*",
+    "@webext-core/messaging": "^2.3.0",
+    "next-themes": "^0.4.6",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "sonner": "^2.0.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.16",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@wxt-dev/module-react": "^1.1.5",
+    "tailwindcss": "^4.1.16",
+    "typescript": "catalog:",
+    "wxt": "^0.20.25"
+  }
+}
