@@ -20,7 +20,7 @@ import type {
   FigmaGuid,
   FigmaNodeChange,
 } from "./converter/types";
-import type { Classify, WalkContext } from "./converter/walk";
+import type { Classify, ConverterLayout, WalkContext } from "./converter/walk";
 import { walkRoot } from "./converter/walk";
 
 export type { ElementKind } from "./converter/classify";
@@ -39,7 +39,7 @@ export type {
 } from "./converter/nodes/text/primitives/font/loader";
 export { createFontsourceLoader } from "./converter/nodes/text/primitives/font/loader";
 export type { FigmaClipboard } from "./converter/types";
-export type { Classify } from "./converter/walk";
+export type { Classify, ConverterLayout } from "./converter/walk";
 
 export type FrameInput = {
   element: Element;
@@ -57,6 +57,13 @@ export type FigmaConverterConfig = {
   imageLoader?: ImageLoader;
   /** Override the default DOM-element classification. */
   classify?: Classify;
+  /**
+   * `"auto"` (default) converts containers into Figma auto-layout frames
+   * whenever the layout can be reproduced exactly, falling back to absolute
+   * positioning per node when it can't. `"absolute"` positions every frame
+   * absolutely, disabling auto-layout inference entirely.
+   */
+  layout?: ConverterLayout;
 };
 
 export type SingleFrameInput = {
@@ -100,6 +107,7 @@ export function createFigmaConverter(
   const fontLoader = config.fontLoader ?? createFontsourceLoader();
   const imageLoader = config.imageLoader ?? createDirectImageLoader();
   const { classify } = config;
+  const layout = config.layout ?? "auto";
 
   const fontCache = createFontCache(fontLoader);
   const imageCache = createImageCache(imageLoader);
@@ -117,6 +125,7 @@ export function createFigmaConverter(
 
     const walkContext: WalkContext = {
       classify,
+      layout,
       createGuid,
       registerBlob: (blob) => blobManager.registerBlob(blob),
       fontCache,
@@ -161,7 +170,10 @@ async function buildSingle(
   walkContext: WalkContext,
   blobManager: BlobManager
 ): Promise<FigmaClipboard> {
-  await walkRoot(input.element, ROOT_FRAME_GUID, walkContext);
+  await walkRoot(input.element, ROOT_FRAME_GUID, walkContext, {
+    width: input.width,
+    height: input.height,
+  });
   return getRootTemplate({
     width: input.width,
     height: input.height,
@@ -195,7 +207,10 @@ async function buildCanvas(
       name: frame.name,
       localId: frameGuid.localID,
     });
-    await walkRoot(frame.element, frameGuid, walkContext);
+    await walkRoot(frame.element, frameGuid, walkContext, {
+      width: frame.width,
+      height: frame.height,
+    });
   }
 
   return getMultiFrameRootTemplate({

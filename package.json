@@ -13,8 +13,12 @@
     "lint": "biome check",
     "format": "biome check --write",
     "knip": "knip",
+    "oracle:capture": "pnpm --filter @figit/fig-kiwi oracle:capture",
+    "oracle:outbox": "pnpm --filter @figit/dom-to-figma oracle:outbox",
     "changeset": "changeset",
-    "release": "pnpm build && pnpm changeset publish"
+    "release": "pnpm build && pnpm changeset publish",
+    "oracle:diff": "pnpm --filter @figit/fig-kiwi oracle:diff",
+    "oracle:distill": "pnpm --filter @figit/fig-kiwi oracle:distill"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.14",

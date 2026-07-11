@@ -60,10 +60,14 @@
     "test:watch": "vitest",
     "check-types": "tsc --noEmit",
     "lint": "biome check",
-    "extract-schema": "tsx ./scripts/extract-schema.ts"
+    "extract-schema": "tsx ./scripts/extract-schema.ts",
+    "oracle:capture": "tsx ./scripts/oracle-capture.ts",
+    "oracle:diff": "tsx ./scripts/oracle-diff.ts",
+    "oracle:distill": "tsx ./scripts/oracle-distill.ts"
   },
   "dependencies": {
-    "fflate": "^0.8.2"
+    "fflate": "^0.8.2",
+    "fzstd": "^0.1.1"
   },
   "devDependencies": {
     "@types/node": "catalog:",
