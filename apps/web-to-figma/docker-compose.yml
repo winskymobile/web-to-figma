@@ -1,0 +1,10 @@
+services:
+  web-to-figma:
+    build:
+      context: ../..
+      dockerfile: apps/web-to-figma/Dockerfile
+    image: web-to-figma:latest
+    container_name: web-to-figma
+    ports:
+      - "8080:80"
+    restart: unless-stopped

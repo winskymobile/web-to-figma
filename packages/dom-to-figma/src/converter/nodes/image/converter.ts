@@ -3,6 +3,10 @@ import type { ImageCache } from "../../image-cache";
 import { parseBorderFromComputedStyle } from "../../styles/border";
 import { parseOpacity } from "../../styles/opacity";
 import { cssBoxShadowToFigmaEffects } from "../../styles/shadow";
+import {
+  cssTransformToFigmaMatrix,
+  getLayoutSize,
+} from "../../styles/transform";
 import type {
   FigmaBlob,
   FigmaGuid,
@@ -29,8 +33,12 @@ export async function elementToImageNodeChange(
   const rect = element.getBoundingClientRect();
   const computedStyle = window.getComputedStyle(element);
 
-  const width = Math.ceil(rect.width);
-  const height = Math.ceil(rect.height);
+  const layoutSize = getLayoutSize(element, {
+    width: rect.width,
+    height: rect.height,
+  });
+  const width = Math.round(layoutSize.width);
+  const height = Math.round(layoutSize.height);
 
   const boxShadow = computedStyle.boxShadow;
   const effects = cssBoxShadowToFigmaEffects(boxShadow);
@@ -63,14 +71,10 @@ export async function elementToImageNodeChange(
       x: width,
       y: height,
     },
-    transform: {
-      m00: 1.0,
-      m01: 0.0,
-      m02: position.x,
-      m10: 0.0,
-      m11: 1.0,
-      m12: position.y,
-    },
+    transform: cssTransformToFigmaMatrix(element, position, {
+      width: rect.width,
+      height: rect.height,
+    }),
 
     /* Stroke and Corner Radius */
     strokeAlign: "INSIDE",

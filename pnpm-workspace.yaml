@@ -9,5 +9,10 @@ catalog:
 
 onlyBuiltDependencies:
   - lefthook
+  - esbuild
 
 engineStrict: true
+
+allowBuilds:
+  esbuild: true
+  lefthook: true

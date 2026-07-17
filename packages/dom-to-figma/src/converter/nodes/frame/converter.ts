@@ -11,6 +11,10 @@ import { createSolidPaint, cssColorToFigmaColor } from "../../styles/color";
 import { cssBackgroundToFigmaPaints } from "../../styles/gradient";
 import { parseOpacity } from "../../styles/opacity";
 import { cssBoxShadowToFigmaEffects } from "../../styles/shadow";
+import {
+  cssTransformToFigmaMatrix,
+  getLayoutSize,
+} from "../../styles/transform";
 import type {
   FigmaFrameNodeChange,
   FigmaGuid,
@@ -150,8 +154,15 @@ export function elementToFrameNodeChange(
 
   // Inside auto-layout stacks the box edges drive sibling positions, so
   // ceiling fractional sizes would accumulate as visible drift there.
-  const width = parentIsAutoLayout ? rect.width : Math.ceil(rect.width);
-  const height = parentIsAutoLayout ? rect.height : Math.ceil(rect.height);
+  // With CSS transform, getBoundingClientRect is the AABB — use layout box.
+  const layoutSize = getLayoutSize(element, {
+    width: rect.width,
+    height: rect.height,
+  });
+  const rawW = layoutSize.width;
+  const rawH = layoutSize.height;
+  const width = parentIsAutoLayout ? rawW : Math.round(rawW);
+  const height = parentIsAutoLayout ? rawH : Math.round(rawH);
 
   const backgroundImage = computedStyle.backgroundImage;
   const backgroundColor = cssColorToFigmaColor(computedStyle.backgroundColor);
@@ -267,14 +278,10 @@ export function elementToFrameNodeChange(
       x: width,
       y: height,
     },
-    transform: {
-      m00: 1.0,
-      m01: 0.0,
-      m02: finalPosition.x,
-      m10: 0.0,
-      m11: 1.0,
-      m12: finalPosition.y,
-    },
+    transform: cssTransformToFigmaMatrix(element, finalPosition, {
+      width: rect.width,
+      height: rect.height,
+    }),
 
     /* Layout */
     stackMode: "NONE",

@@ -41,6 +41,21 @@ See the [`dom-to-figma` README](./packages/dom-to-figma) for the full API: custo
 pnpm add @figit/dom-to-figma
 ```
 
+## web-to-figma
+
+Lightweight local web UI to open an HTML file + asset folder and copy into Figma.
+
+```sh
+pnpm --filter web-to-figma dev
+# http://localhost:4177
+
+# Docker (from repo root)
+docker build -f apps/web-to-figma/Dockerfile -t web-to-figma .
+docker run --rm -p 8080:80 web-to-figma
+```
+
+See [apps/web-to-figma/README.md](./apps/web-to-figma/README.md).
+
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md).

@@ -69,6 +69,39 @@
           }
         }
       }
+    },
+    {
+      "includes": ["**/apps/web-to-figma/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noNonNullAssertion": "off",
+            "noNestedTernary": "off",
+            "useBlockStatements": "off",
+            "useConsistentArrayType": "off",
+            "useImportType": "off",
+            "useNumberNamespace": "off",
+            "useNumericSeparators": "off"
+          },
+          "a11y": {
+            "noNoninteractiveElementInteractions": "off",
+            "noSvgWithoutTitle": "off"
+          },
+          "suspicious": {
+            "useAwait": "off",
+            "noUnusedExpressions": "off"
+          },
+          "complexity": {
+            "noVoid": "off"
+          },
+          "nursery": {
+            "useSortedClasses": "off"
+          },
+          "correctness": {
+            "useExhaustiveDependencies": "off"
+          }
+        }
+      }
     }
   ]
 }

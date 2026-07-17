@@ -1,6 +1,7 @@
 import type { Position } from "../../dom";
 import { getElementSize } from "../../dom";
 import { parseOpacity } from "../../styles/opacity";
+import { cssTransformToFigmaMatrix } from "../../styles/transform";
 import type { FigmaGroupNodeChange, FigmaGuid } from "../../types";
 
 type Params = {
@@ -37,14 +38,10 @@ export function elementToGroupNodeChange(
       x: size.width,
       y: size.height,
     },
-    transform: {
-      m00: 1.0,
-      m01: 0.0,
-      m02: position.x,
-      m10: 0.0,
-      m11: 1.0,
-      m12: position.y,
-    },
+    transform: cssTransformToFigmaMatrix(element, position, {
+      width: size.width,
+      height: size.height,
+    }),
 
     /* Other */
     autoRename: true,

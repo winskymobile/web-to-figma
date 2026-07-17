@@ -173,10 +173,17 @@ async function walkChildren(
   ctx: WalkContext,
   parentStack: ParentStackInfo = NO_PARENT_STACK
 ) {
-  const sortedNodes = sortNodesByStackingOrder(Array.from(element.childNodes));
+  // Auto-layout parents: Figma stacks lay out in *emission* order, so keep
+  // DOM order (or reverse for flex-direction reverse). Sorting by stacking
+  // order here reorders siblings in the layer tree and breaks hierarchy.
+  // Absolute parents: stacking order preserves paint/z without affecting
+  // positions (each child is absolutely placed).
+  const childNodes = Array.from(element.childNodes);
+  const sortedNodes = parentStack.isAutoLayout
+    ? childNodes
+    : sortNodesByStackingOrder(childNodes);
   if (parentStack.reverse) {
-    // Reversed flex parent: Figma stacks lay children out in emission order,
-    // so emit the visual order; stackReverseZIndex restores paint order.
+    // Reversed flex parent: emit visual order; stackReverseZIndex restores paint.
     sortedNodes.reverse();
   }
 

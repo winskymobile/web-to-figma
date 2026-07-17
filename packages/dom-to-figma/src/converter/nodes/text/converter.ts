@@ -4,6 +4,7 @@ import type { FontCache } from "../../font-cache";
 import { createSolidPaint, cssColorToFigmaColor } from "../../styles/color";
 import { cssBackgroundToFigmaPaints } from "../../styles/gradient";
 import { parseOpacity } from "../../styles/opacity";
+import { cssTransformToFigmaMatrix } from "../../styles/transform";
 import type {
   FigmaBlob,
   FigmaGuid,
@@ -263,6 +264,23 @@ export async function nodeToTextNodeChange(
     },
   });
 
+  // CJK subset faces (e.g. Noto Sans SC) often omit arrows/checkmarks.
+  // Load a latin face so missing code points still get real outlines.
+  // Never fall back to commandsBlob 0 — that reuses another character's path
+  // (e.g. "→" showing as "和" until the text is re-edited in Figma).
+  let symbolFallback: typeof loadedFont | null = null;
+  try {
+    if (loadedFont.properties.family !== "Inter") {
+      symbolFallback = await fontCache.get({
+        family: "Inter",
+        weight: loadedFont.actualWeight ?? loadedFont.properties.weight ?? 400,
+        italic: false,
+      });
+    }
+  } catch {
+    symbolFallback = null;
+  }
+
   const glyphs = processGlyphs(
     loadedFont,
     text,
@@ -270,7 +288,8 @@ export async function nodeToTextNodeChange(
       fontSize: styles.fontSize,
       includeWhitespace: true,
     },
-    registerBlob
+    registerBlob,
+    symbolFallback ? [symbolFallback] : []
   );
 
   const baselines = buildBaselines(
@@ -389,8 +408,14 @@ export async function nodeToTextNodeChange(
       }),
       glyphs: layout.positions.map((pos, i) => {
         const glyphData = glyphs.glyphDataMap.get(pos.character);
+        // Prefer real outline; if still missing, emit empty path blob once so we
+        // do not reuse index 0 (another character's outline).
+        let commandsBlob = glyphData?.registeredBlobIndex;
+        if (commandsBlob === undefined) {
+          commandsBlob = registerBlob({ bytes: [0] });
+        }
         const glyphPosition = {
-          commandsBlob: glyphData?.registeredBlobIndex ?? 0,
+          commandsBlob,
           position: {
             x: pos.x,
             y: pos.y,
@@ -454,14 +479,10 @@ export async function nodeToTextNodeChange(
       x: adjustedSize.width,
       y: adjustedSize.height,
     },
-    transform: {
-      m00: 1.0,
-      m01: 0.0,
-      m02: adjustedPosition.x,
-      m10: 0.0,
-      m11: 1.0,
-      m12: adjustedPosition.y,
-    },
+    transform: cssTransformToFigmaMatrix(element, adjustedPosition, {
+      width: adjustedSize.width,
+      height: adjustedSize.height,
+    }),
 
     /* Text */
     characters: text,

@@ -1,0 +1,22 @@
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+  color: #1a1a1a;
+  background: #f4f1ea;
+}
+.card {
+  max-width: 420px;
+  padding: 32px;
+  margin: 48px auto;
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+}
+h1 {
+  margin: 0 0 8px;
+  font-size: 28px;
+}
+p {
+  margin: 0 0 16px;
+  color: #555;
+}
