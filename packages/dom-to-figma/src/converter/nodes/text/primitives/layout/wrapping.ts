@@ -94,6 +94,27 @@ export type MultiLineLayout = {
  *
  * @internal
  */
+/**
+ * Characters that browsers commonly break between even without spaces
+ * (CJK, Hangul, full-width punctuation). Emitted as one token per character
+ * so word-wrap matches browser soft-wrap for Chinese/Japanese/Korean copy.
+ */
+function isSoftBreakChar(char: string): boolean {
+  const code = char.codePointAt(0);
+  if (code === undefined) {
+    return false;
+  }
+  return (
+    (code >= 0x30_40 && code <= 0x30_ff) || // Hiragana / Katakana
+    (code >= 0x34_00 && code <= 0x4d_bf) || // CJK Extension A
+    (code >= 0x4e_00 && code <= 0x9f_ff) || // CJK Unified
+    (code >= 0xf9_00 && code <= 0xfa_ff) || // CJK Compatibility
+    (code >= 0x30_00 && code <= 0x30_3f) || // CJK Symbols / punctuation
+    (code >= 0xff_00 && code <= 0xff_ef) || // Half/full-width forms
+    (code >= 0xac_00 && code <= 0xd7_af) // Hangul syllables
+  );
+}
+
 function tokenizeText(
   text: string
 ): Array<{ type: "word" | "space" | "newline"; content: string }> {
@@ -101,31 +122,31 @@ function tokenizeText(
     [];
   let currentWord = "";
 
+  const flushWord = () => {
+    if (currentWord) {
+      tokens.push({ type: "word", content: currentWord });
+      currentWord = "";
+    }
+  };
+
   for (const char of text) {
-    if (char === " ") {
-      // biome-ignore lint/nursery/noUnnecessaryConditions: false positive
-      if (currentWord) {
-        tokens.push({ type: "word", content: currentWord });
-        currentWord = "";
+    if (char === " " || char === "\u00a0" || char === "\u3000") {
+      flushWord();
+      tokens.push({ type: "space", content: " " });
+    } else if (char === "\n" || char === "\r") {
+      if (char === "\n") {
+        flushWord();
+        tokens.push({ type: "newline", content: "\n" });
       }
-      tokens.push({ type: "space", content: char });
-    } else if (char === "\n") {
-      // biome-ignore lint/nursery/noUnnecessaryConditions: false positive
-      if (currentWord) {
-        tokens.push({ type: "word", content: currentWord });
-        currentWord = "";
-      }
-      tokens.push({ type: "newline", content: char });
+    } else if (isSoftBreakChar(char)) {
+      flushWord();
+      tokens.push({ type: "word", content: char });
     } else {
       currentWord += char;
     }
   }
 
-  // biome-ignore lint/nursery/noUnnecessaryConditions: false positive
-  if (currentWord) {
-    tokens.push({ type: "word", content: currentWord });
-  }
-
+  flushWord();
   return tokens;
 }
 
@@ -240,10 +261,9 @@ export function calculateWrappedLayout(
   const {
     maxWidth,
     wordWrap = true,
-    breakWords = false,
     letterSpacing = 0,
     lineHeight: customLineHeight,
-    wrapTolerance = 2, // Default 2px tolerance
+    wrapTolerance = 0.5, // Prefer matching browser breaks over under-wrapping
   } = options;
 
   const lines: Array<LinePosition> = [];
@@ -293,8 +313,10 @@ export function calculateWrappedLayout(
 
       const tokenContent = token.content;
 
-      // For words, check if we need to break them
-      if (token.type === "word" && breakWords) {
+      // For words, break them when they alone exceed the line width.
+      // CJK is tokenized per character; this path also covers long Latin
+      // strings that would otherwise overflow without wrapping.
+      if (token.type === "word") {
         const wordWidth = calculateSegmentWidth(
           font,
           tokenContent,

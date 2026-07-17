@@ -249,7 +249,13 @@ export async function nodeToTextNodeChange(
   // unaffected: every browser break also overflows the (narrower) box, and
   // no line exceeds it. The buffer absorbs font-metric differences between
   // the browser and OpenType.js.
-  const wrappingContainerWidth = nodeSize.width + widthBuffer;
+  // For multi-line text, wrap against the measured box width (no buffer).
+  // Buffering the wrap width under-wraps CJK relative to the browser and
+  // leaves lines that still overflow the Figma frame. Single-line keeps a
+  // small buffer so OpenType metrics don't spuriously break a fitting line.
+  const wrappingContainerWidth = isSingleLine
+    ? nodeSize.width + widthBuffer
+    : Math.max(1, nodeSize.width);
 
   const layout = processTextLayout(loadedFont.font, text, {
     fontSize: styles.fontSize,
@@ -259,8 +265,10 @@ export async function nodeToTextNodeChange(
     lineHeight: styles.lineHeight,
     wrapping: {
       enabled: true,
+      // Mirror browser layout: only re-wrap when the DOM already soft-wrapped.
       wordWrap: !isSingleLine,
-      breakWords: false,
+      // Allow hard-breaking oversized tokens (esp. CJK already per-char).
+      breakWords: !isSingleLine,
     },
   });
 
