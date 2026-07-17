@@ -168,3 +168,8 @@ export function dirnameKey(key: string): string {
   const i = n.lastIndexOf("/");
   return i === -1 ? "" : n.slice(0, i);
 }
+
+/** Number of distinct files in the index (Map keys include path aliases). */
+export function countUniqueAssets(index: AssetIndex): number {
+  return new Set(index.values()).size;
+}

@@ -4,12 +4,20 @@ import { toast } from "sonner";
 import { PreviewStage } from "./components/preview-stage";
 import { ResourcePrompt } from "./components/resource-prompt";
 import { Toolbar } from "./components/toolbar";
-import type { AssetIndex } from "./lib/asset-map";
+import { type AssetIndex, countUniqueAssets } from "./lib/asset-map";
 import { getConverter, setPreviewDocument } from "./lib/converter";
 import { pickAssetFolder } from "./lib/pick-folder";
 import { preparePreviewFontsForConvert } from "./lib/prepare-preview-fonts";
 import { rewriteHtmlDocument } from "./lib/rewrite-html";
 import { scanLocalAssetRefs } from "./lib/scan-refs";
+import {
+  type DeviceKind,
+  loadViewportPreset,
+  presetForKind,
+  saveViewportPreset,
+  type ViewportPreset,
+  withWidth,
+} from "./lib/viewport";
 
 type Session = {
   htmlName: string;
@@ -42,6 +50,9 @@ export function App() {
   const [copying, setCopying] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false);
   const [pendingRefs, setPendingRefs] = useState<Array<string>>([]);
+  const [viewport, setViewport] = useState<ViewportPreset>(() =>
+    loadViewportPreset()
+  );
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const objectUrlsRef = useRef<Array<string>>([]);
@@ -100,7 +111,7 @@ export function App() {
           missing: result.missing,
           rewrittenCount: result.rewrittenCount,
           objectUrls: result.objectUrls,
-          assetCount: index.size,
+          assetCount: countUniqueAssets(index),
           localRefs,
         });
 
@@ -149,9 +160,13 @@ export function App() {
       setPromptOpen(false);
       if (htmlFile) {
         await rebuildPreview(htmlFile, index, root, { offerPrompt: false });
-        toast.success(`已加载资源目录 ${root}（${index.size} 个文件）`);
+        toast.success(
+          `已加载资源目录 ${root}（${countUniqueAssets(index)} 个文件）`
+        );
       } else {
-        toast.success(`已索引 ${index.size} 个资源（${root}），请再选择 HTML`);
+        toast.success(
+          `已索引 ${countUniqueAssets(index)} 个资源（${root}），请再选择 HTML`
+        );
       }
     },
     [htmlFile, rebuildPreview]
@@ -164,6 +179,27 @@ export function App() {
     }
     await applyFolder(picked.index, picked.folderName);
   }, [applyFolder]);
+
+  const onDeviceKindChange = useCallback((kind: DeviceKind) => {
+    setViewport((prev) => {
+      const next = presetForKind(kind, prev);
+      saveViewportPreset(next);
+      return next;
+    });
+  }, []);
+
+  const onViewportWidthChange = useCallback((width: number) => {
+    setViewport((prev) => {
+      const next = withWidth(prev.kind, width);
+      if (!next) {
+        return prev;
+      }
+      saveViewportPreset(next);
+      return next;
+    });
+  }, []);
+
+  const logicalWidth = viewport.width;
 
   const onCopy = async () => {
     const iframe = iframeRef.current;
@@ -190,16 +226,25 @@ export function App() {
       }
       const prepared = await preparePreviewFontsForConvert(doc);
       restoreFonts = prepared.restore;
-      const widthAfter = Math.max(
+
+      const contentW = Math.max(
         root.scrollWidth,
         doc.documentElement.scrollWidth,
-        320
+        1
       );
-      const heightAfter = Math.max(
+      const contentH = Math.max(
         root.scrollHeight,
         doc.documentElement.scrollHeight,
         200
       );
+      if (contentW > logicalWidth + 1) {
+        toast.message(
+          `内容宽度 ${Math.round(contentW)}px 超出画板 ${logicalWidth}px，已按内容宽度导出`,
+          { duration: 4500 }
+        );
+      }
+      const widthAfter = Math.max(contentW, logicalWidth);
+      const heightAfter = contentH;
       const converter = getConverter();
       const result = await converter.convert({
         element: root,
@@ -235,7 +280,11 @@ export function App() {
   return (
     <div className="flex h-full min-h-dvh flex-col bg-[var(--bg)] text-[var(--ink)]">
       <Toolbar
-        assetCount={assetIndex?.size ?? session?.assetCount ?? 0}
+        assetCount={
+          assetIndex
+            ? countUniqueAssets(assetIndex)
+            : (session?.assetCount ?? 0)
+        }
         building={building}
         canClear={Boolean(session || htmlFile)}
         canCopy={Boolean(session) && !building}
@@ -248,7 +297,10 @@ export function App() {
         onChangeHtml={() => htmlInputRef.current?.click()}
         onClear={clearSession}
         onCopy={() => void onCopy()}
+        onDeviceKindChange={onDeviceKindChange}
+        onViewportWidthChange={onViewportWidthChange}
         rewrittenCount={session?.rewrittenCount ?? 0}
+        viewport={viewport}
       />
 
       <input
@@ -275,6 +327,7 @@ export function App() {
 
       <PreviewStage
         html={session?.previewHtml ?? null}
+        logicalWidth={logicalWidth}
         onDropHtmlFile={(file) => void loadHtmlFile(file)}
         onRequestHtmlPick={() => htmlInputRef.current?.click()}
         ref={iframeRef}

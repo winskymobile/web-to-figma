@@ -50,7 +50,10 @@ body {
 button,
 input,
 label {
-  font: inherit;
+  /* Avoid `font: inherit` shorthand: unlayered rules beat Tailwind
+     utilities and would force browser 16px font-size on all buttons. */
+  font-family: inherit;
+  letter-spacing: inherit;
 }
 
 ::selection {
