@@ -53,17 +53,43 @@ export type InferredAutoLayout = {
   reverseChildren?: boolean;
 };
 
+/** Stable machine-readable reasons when Auto Layout inference declines a container. */
+export type LayoutInferBailReason =
+  | "display-not-supported"
+  | "direct-text-node" // retained for compatibility; text is now flow-eligible
+  | "no-flow-children"
+  | "stacking-order-mismatch"
+  | "zero-size"
+  | "order-nonzero"
+  | "non-uniform-gap"
+  | "unmapped-align"
+  | "verify-geometry-failed"
+  | "wrap-variant-unsupported"
+  | "wrap-justify-not-min"
+  | "wrap-align-not-min"
+  | "wrap-with-grow"
+  | "wrap-nonuniform-gap"
+  | "wrap-sim-mismatch"
+  | "block-inline-child"
+  | "float-child"
+  | "content-overflow"
+  | "reverse-with-absolute"
+  | "unhandled";
+
+export type TryInferAutoLayoutResult =
+  | { ok: true; value: InferredAutoLayout }
+  | { ok: false; reason: LayoutInferBailReason };
+
+type FlowItem = Element | Text;
+
 type StackJustifyValue = "MIN" | "CENTER" | "MAX" | "SPACE_BETWEEN";
 type StackAlignValue = "MIN" | "CENTER" | "MAX";
 type StackSizingValue = "FIXED" | "RESIZE_TO_FIT";
 
-/** Max deviation (px) between reconstructed and measured child positions.
- * Looser than the oracle-strict 0.6 so more leaf flex/block containers become
- * auto-layout; outliers that still don't fit become stackPositioning ABSOLUTE
- * instead of discarding the whole stack. */
-const GEOMETRY_TOLERANCE = 4;
+/** Max deviation (px) between reconstructed and measured child positions. */
+const GEOMETRY_TOLERANCE = 0.6;
 /** Max spread (max−min) among inter-child gaps still treated as one stack gap. */
-const GAP_SPREAD_TOLERANCE = 6;
+const GAP_SPREAD_TOLERANCE = GEOMETRY_TOLERANCE;
 
 const JUSTIFY_MAP: Record<string, StackJustifyValue> = {
   normal: "MIN",
@@ -93,10 +119,7 @@ const ALIGN_MAP: Record<string, StackAlignValue> = {
   center: "CENTER",
   "flex-end": "MAX",
   end: "MAX",
-  // Approximate baseline as start — better to keep a stack than bail entirely.
-  baseline: "MIN",
-  "first baseline": "MIN",
-  "last baseline": "MIN",
+  // baseline needs font-metric math we don't model yet -> bail.
 };
 
 type Rect = { x: number; y: number; width: number; height: number };
@@ -117,64 +140,57 @@ const BLOCK_LEVEL_DISPLAYS = new Set([
  * absolutely positioned, which is always safe).
  *
  * Covers flex containers (HORIZONTAL/VERTICAL by direction) and plain block
- * flow (VERTICAL when spacing is uniform). Absolutely positioned children
- * ride along with `stackPositioning: "ABSOLUTE"` instead of blocking the
- * container. Children that conflict with the stack (irregular spacing,
- * non-flow layout) are kept inside the frame with `stackPositioning:
- * "ABSOLUTE"` so the parent can still be auto-layout. Hard bails remain for
- * direct text-node flow and unsupported display types.
+ * flow (VERTICAL when spacing is uniform). Direct non-empty Text nodes may
+ * participate as flex/grid flow items (Range-measured). Absolutely positioned
+ * children ride along with `stackPositioning: "ABSOLUTE"` instead of blocking
+ * the container. Out of scope (bails): wrapping patterns that cannot be
+ * reconstructed, non-uniform gaps, order/z-index reordering, baseline
+ * alignment, floats, and bare text inside pure block stacks.
  */
 export function inferAutoLayout(element: Element): InferredAutoLayout | null {
+  const result = tryInferAutoLayout(element);
+  return result.ok ? result.value : null;
+}
+
+/**
+ * Like `inferAutoLayout`, but returns a stable bail reason for diagnostics.
+ */
+export function tryInferAutoLayout(element: Element): TryInferAutoLayoutResult {
   const style = window.getComputedStyle(element);
   const display = style.display;
   const isFlex = display === "flex" || display === "inline-flex";
   const isBlock = display === "block" || display === "flow-root";
   const isGrid = display === "grid" || display === "inline-grid";
   if (!(isFlex || isBlock || isGrid)) {
-    return null;
+    return { ok: false, reason: "display-not-supported" };
   }
 
   const collected = collectChildren(element);
-  if (!collected) {
-    return null;
+  if (!collected.ok) {
+    return collected;
   }
   const { flow, absolute } = collected;
-  // Leaf chips/buttons often have only text nodes (no element children).
-  // Still emit an auto-layout frame so the bottom shell is a stack.
   if (flow.length === 0) {
-    // Text-only / empty leaves need flex or block to host a stack shell.
-    if (!(isFlex || isBlock) && absolute.length === 0) {
-      return null;
-    }
-    const leaf = inferLeafShellStack(element, style, isFlex);
-    if (!leaf) {
-      return null;
-    }
-    for (const child of absolute) {
-      leaf.childOverrides.set(child, { stackPositioning: "ABSOLUTE" });
-    }
-    return {
-      stack: leaf.stack,
-      children: leaf.childOverrides,
-      reverseChildren: leaf.reverseChildren,
-    };
+    return { ok: false, reason: "no-flow-children" };
+  }
+
+  // Stack layout follows DOM order. Bail only when numeric z-index would
+  // reorder flow children relative to each other. `position: relative` with
+  // z-index:auto must not block inference (walker may still paint via stack
+  // order, but geometry order stays DOM order).
+  if (flowHasNumericZIndexReorder(flow)) {
+    return { ok: false, reason: "stacking-order-mismatch" };
   }
 
   const parentRect = element.getBoundingClientRect();
   // Skip zero-size shells
   if (parentRect.width < 0.5 || parentRect.height < 0.5) {
-    return null;
+    return { ok: false, reason: "zero-size" };
   }
 
-  const childRects: Array<Rect> = flow.map((child) => {
-    const rect = child.getBoundingClientRect();
-    return {
-      x: rect.left - parentRect.left,
-      y: rect.top - parentRect.top,
-      width: rect.width,
-      height: rect.height,
-    };
-  });
+  const childRects: Array<Rect> = flow.map((child) =>
+    getFlowItemRect(child, parentRect)
+  );
   const parentSize = { width: parentRect.width, height: parentRect.height };
 
   const input: StackInferenceInput = {
@@ -185,46 +201,98 @@ export function inferAutoLayout(element: Element): InferredAutoLayout | null {
     parentSize,
   };
 
-  // Prefer exact geometry. Outliers only when a clear majority still stacks;
-  // never park "centered" flow children as absolute — use stack alignment.
   let inferred: StackInference | null = null;
+  let pathReason: LayoutInferBailReason = "unhandled";
   if (isFlex) {
     if (style.flexWrap === "nowrap") {
-      inferred = inferFlexStack(input) ?? inferFlexStackWithOutliers(input);
+      const r = inferFlexStack(input);
+      if (r.ok) {
+        inferred = r.value;
+      } else {
+        pathReason = r.reason;
+      }
     } else {
-      inferred = inferWrapStack(input, "flex");
+      const r = inferWrapStack(input, "flex");
+      if (r.ok) {
+        inferred = r.value;
+      } else {
+        pathReason = r.reason;
+      }
     }
   } else if (isBlock) {
-    inferred = inferBlockStack(input) ?? inferBlockStackWithOutliers(input);
+    const r = inferBlockStack(input);
+    if (r.ok) {
+      inferred = r.value;
+    } else {
+      pathReason = r.reason;
+    }
   } else {
-    inferred =
-      inferBlockStack(input) ??
-      inferWrapStack(input, "grid") ??
-      inferBlockStackWithOutliers(input);
+    const block = inferBlockStack(input);
+    if (block.ok) {
+      inferred = block.value;
+    } else {
+      const wrap = inferWrapStack(input, "grid");
+      if (wrap.ok) {
+        inferred = wrap.value;
+      } else {
+        pathReason = wrap.reason !== "unhandled" ? wrap.reason : block.reason;
+      }
+    }
   }
   if (!inferred) {
-    return null;
+    return { ok: false, reason: pathReason };
   }
 
-  // Only CSS absolute/fixed (and order≠0) stay absolute in the parent stack.
+  // Reversal reorders emission; mixing that with absolute children (which
+  // keep their stacking positions) isn't modeled yet.
+  if (inferred.reverseChildren && absolute.length > 0) {
+    return { ok: false, reason: "reverse-with-absolute" };
+  }
+
   for (const child of absolute) {
-    inferred.childOverrides.set(child, {
-      ...inferred.childOverrides.get(child),
-      stackPositioning: "ABSOLUTE",
-    });
+    inferred.childOverrides.set(child, { stackPositioning: "ABSOLUTE" });
   }
 
   return {
-    stack: inferred.stack,
-    children: inferred.childOverrides,
-    reverseChildren: inferred.reverseChildren,
+    ok: true,
+    value: {
+      stack: inferred.stack,
+      children: inferred.childOverrides,
+      reverseChildren: inferred.reverseChildren,
+    },
+  };
+}
+
+function isElementFlowItem(item: FlowItem): item is Element {
+  return item.nodeType === Node.ELEMENT_NODE;
+}
+
+function getFlowItemRect(item: FlowItem, parentRect: DOMRect): Rect {
+  if (item.nodeType === Node.TEXT_NODE) {
+    const range = document.createRange();
+    range.selectNodeContents(item);
+    const rect = range.getBoundingClientRect();
+    return {
+      x: rect.left - parentRect.left,
+      y: rect.top - parentRect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+  }
+  const el = item as Element;
+  const rect = el.getBoundingClientRect();
+  return {
+    x: rect.left - parentRect.left,
+    y: rect.top - parentRect.top,
+    width: rect.width,
+    height: rect.height,
   };
 }
 
 type StackInferenceInput = {
   element: Element;
   style: CSSStyleDeclaration;
-  flow: ReadonlyArray<Element>;
+  flow: ReadonlyArray<FlowItem>;
   childRects: ReadonlyArray<Rect>;
   parentSize: { width: number; height: number };
 };
@@ -235,7 +303,11 @@ type StackInference = {
   reverseChildren?: boolean;
 };
 
-function inferFlexStack(input: StackInferenceInput): StackInference | null {
+function inferFlexStack(
+  input: StackInferenceInput
+):
+  | { ok: true; value: StackInference }
+  | { ok: false; reason: LayoutInferBailReason } {
   const { element, style, parentSize } = input;
 
   const direction = style.flexDirection;
@@ -249,195 +321,82 @@ function inferFlexStack(input: StackInferenceInput): StackInference | null {
     ? [...input.childRects].reverse()
     : input.childRects;
 
-  let cssJustify = JUSTIFY_MAP[style.justifyContent] ?? "MIN";
-  const cssAlign = ALIGN_MAP[style.alignItems] ?? "MIN";
+  let justify = JUSTIFY_MAP[style.justifyContent];
+  const align = ALIGN_MAP[style.alignItems];
+  if (!(justify && align)) {
+    return { ok: false, reason: "unmapped-align" };
+  }
   // In reversed flow the main-axis start/end swap in visual terms.
-  if (reversed && cssJustify === "MIN") {
-    cssJustify = "MAX";
-  } else if (reversed && cssJustify === "MAX") {
-    cssJustify = "MIN";
+  if (reversed && justify === "MIN") {
+    justify = "MAX";
+  } else if (reversed && justify === "MAX") {
+    justify = "MIN";
   }
 
-  const cssGap = readCssGap(style, isRow);
-  const spacing = cssGap ?? uniformGap(childRects, isRow);
+  const spacing = uniformGap(childRects, isRow);
   if (spacing === null) {
-    return null;
+    return { ok: false, reason: "non-uniform-gap" };
   }
 
-  const cssPad = {
-    left: round2(edge(style.borderLeftWidth) + edge(style.paddingLeft)),
-    top: round2(edge(style.borderTopWidth) + edge(style.paddingTop)),
-    right: round2(edge(style.borderRightWidth) + edge(style.paddingRight)),
-    bottom: round2(edge(style.borderBottomWidth) + edge(style.paddingBottom)),
+  const spec: InferredStack = {
+    stackMode: isRow ? "HORIZONTAL" : "VERTICAL",
+    stackSpacing: spacing,
+    stackPrimaryAlignItems: justify,
+    stackCounterAlignItems: align,
+    stackPrimarySizing: "FIXED",
+    stackCounterSizing: "FIXED",
+    stackHorizontalPadding: round2(
+      edge(style.borderLeftWidth) + edge(style.paddingLeft)
+    ),
+    stackVerticalPadding: round2(
+      edge(style.borderTopWidth) + edge(style.paddingTop)
+    ),
+    stackPaddingRight: round2(
+      edge(style.borderRightWidth) + edge(style.paddingRight)
+    ),
+    stackPaddingBottom: round2(
+      edge(style.borderBottomWidth) + edge(style.paddingBottom)
+    ),
+    ...(reversed && { stackReverseZIndex: true }),
   };
 
-  // Try CSS alignment first, then geometry-derived center/start/end so
-  // centered flex items stay in-flow (not absolute outliers).
-  const justifyCandidates = uniqueAligns(
-    cssJustify,
-    "MIN",
-    "CENTER",
-    "MAX",
-    "SPACE_BETWEEN"
-  );
-  const alignCandidates = uniqueAligns(cssAlign, "MIN", "CENTER", "MAX");
+  if (!verifyGeometry(spec, parentSize, childRects)) {
+    return { ok: false, reason: "verify-geometry-failed" };
+  }
 
-  for (const justify of justifyCandidates) {
-    for (const align of alignCandidates) {
-      const pads = padsForFlexAlignment(
-        childRects,
+  const elementFlow = flow.filter(isElementFlowItem);
+
+  applySizingModes({
+    element,
+    style,
+    spec,
+    parent: parentSize,
+    children: elementFlow,
+    childRects: elementFlow.map((child) => {
+      const i = flow.indexOf(child);
+      return childRects[i] as Rect;
+    }),
+    isRow,
+  });
+
+  return {
+    ok: true,
+    value: {
+      stack: spec,
+      childOverrides: inferChildOverrides({
+        element,
+        children: elementFlow,
+        childRects: elementFlow.map((child) => {
+          const i = flow.indexOf(child);
+          return childRects[i] as Rect;
+        }),
+        parentStyle: style,
+        spec,
         parentSize,
         isRow,
-        justify,
-        align,
-        spacing,
-        cssPad
-      );
-      const spec: InferredStack = {
-        stackMode: isRow ? "HORIZONTAL" : "VERTICAL",
-        stackSpacing: spacing,
-        stackPrimaryAlignItems: justify,
-        stackCounterAlignItems: align,
-        stackPrimarySizing: "FIXED",
-        stackCounterSizing: "FIXED",
-        stackHorizontalPadding: pads.left,
-        stackVerticalPadding: pads.top,
-        stackPaddingRight: pads.right,
-        stackPaddingBottom: pads.bottom,
-        ...(reversed && { stackReverseZIndex: true }),
-      };
-
-      if (!verifyGeometry(spec, parentSize, childRects)) {
-        continue;
-      }
-
-      applySizingModes({
-        element,
-        style,
-        spec,
-        parent: parentSize,
-        children: flow,
-        childRects,
-        isRow,
-      });
-
-      return {
-        stack: spec,
-        childOverrides: inferChildOverrides({
-          element,
-          children: flow,
-          childRects,
-          parentStyle: style,
-          spec,
-          parentSize,
-          isRow,
-        }),
-        reverseChildren: reversed || undefined,
-      };
-    }
-  }
-
-  return null;
-}
-
-function uniqueAligns<T extends string>(
-  preferred: T,
-  ...rest: Array<T>
-): Array<T> {
-  const out: Array<T> = [preferred];
-  for (const v of rest) {
-    if (!out.includes(v)) {
-      out.push(v);
-    }
-  }
-  return out;
-}
-
-/** Derive paddings that make justify/align match measured child boxes. */
-function padsForFlexAlignment(
-  childRects: ReadonlyArray<Rect>,
-  parentSize: { width: number; height: number },
-  isRow: boolean,
-  justify: StackJustifyValue,
-  align: StackAlignValue,
-  spacing: number,
-  cssPad: { left: number; top: number; right: number; bottom: number }
-): { left: number; top: number; right: number; bottom: number } {
-  if (childRects.length === 0) {
-    return cssPad;
-  }
-  const first = childRects[0] as Rect;
-  const last = childRects.at(-1) as Rect;
-  const primaryTotal =
-    childRects.reduce((n, r) => n + (isRow ? r.width : r.height), 0) +
-    spacing * (childRects.length - 1);
-  const maxCross = Math.max(
-    ...childRects.map((r) => (isRow ? r.height : r.width))
-  );
-
-  let padLeading: number;
-  let padTrailing: number;
-  if (justify === "MIN") {
-    padLeading = isRow ? first.x : first.y;
-    padTrailing = isRow
-      ? parentSize.width - (last.x + last.width)
-      : parentSize.height - (last.y + last.height);
-  } else if (justify === "MAX") {
-    padTrailing = isRow
-      ? parentSize.width - (last.x + last.width)
-      : parentSize.height - (last.y + last.height);
-    padLeading = isRow
-      ? parentSize.width - padTrailing - primaryTotal
-      : parentSize.height - padTrailing - primaryTotal;
-  } else if (justify === "CENTER") {
-    const free = (isRow ? parentSize.width : parentSize.height) - primaryTotal;
-    padLeading = free / 2;
-    padTrailing = free / 2;
-  } else {
-    // SPACE_BETWEEN: use CSS padding; free space is between items
-    padLeading = isRow ? cssPad.left : cssPad.top;
-    padTrailing = isRow ? cssPad.right : cssPad.bottom;
-  }
-
-  // Cross-axis padding from first child's offset when all share alignment
-  let padCross: number;
-  let padCrossTrailing: number;
-  if (align === "MIN") {
-    padCross = Math.min(...childRects.map((r) => (isRow ? r.y : r.x)));
-    padCrossTrailing = isRow
-      ? parentSize.height - (padCross + maxCross)
-      : parentSize.width - (padCross + maxCross);
-  } else if (align === "MAX") {
-    padCrossTrailing = Math.min(
-      ...childRects.map((r) =>
-        isRow
-          ? parentSize.height - (r.y + r.height)
-          : parentSize.width - (r.x + r.width)
-      )
-    );
-    padCross = isRow
-      ? parentSize.height - padCrossTrailing - maxCross
-      : parentSize.width - padCrossTrailing - maxCross;
-  } else {
-    // CENTER
-    const free = (isRow ? parentSize.height : parentSize.width) - maxCross;
-    padCross = free / 2;
-    padCrossTrailing = free / 2;
-  }
-
-  if (isRow) {
-    return {
-      left: round2(Math.max(0, padLeading)),
-      top: round2(Math.max(0, padCross)),
-      right: round2(Math.max(0, padTrailing)),
-      bottom: round2(Math.max(0, padCrossTrailing)),
-    };
-  }
-  return {
-    left: round2(Math.max(0, padCross)),
-    top: round2(Math.max(0, padLeading)),
-    right: round2(Math.max(0, padCrossTrailing)),
-    bottom: round2(Math.max(0, padTrailing)),
+      }),
+      reverseChildren: reversed || undefined,
+    },
   };
 }
 
@@ -452,25 +411,34 @@ function padsForFlexAlignment(
 function inferWrapStack(
   input: StackInferenceInput,
   source: "flex" | "grid"
-): StackInference | null {
+):
+  | { ok: true; value: StackInference }
+  | { ok: false; reason: LayoutInferBailReason } {
   const { element, style, flow, childRects, parentSize } = input;
 
+  let wrapCounterAlign: StackAlignValue = "MIN";
   if (source === "flex") {
     if (style.flexDirection !== "row" || style.flexWrap !== "wrap") {
-      return null; // wrap-reverse / column wrap aren't modeled.
+      return { ok: false, reason: "wrap-variant-unsupported" };
     }
     // Row-internal distribution other than left-packed changes Figma's
     // re-flow in ways the simulation below doesn't model.
     if (JUSTIFY_MAP[style.justifyContent] !== "MIN") {
-      return null;
+      return { ok: false, reason: "wrap-justify-not-min" };
     }
-    if (ALIGN_MAP[style.alignItems] !== "MIN") {
-      return null;
+    const mappedAlign = ALIGN_MAP[style.alignItems];
+    if (!mappedAlign) {
+      // baseline / unmapped — still unsupported for wrap.
+      return { ok: false, reason: "wrap-align-not-min" };
     }
+    wrapCounterAlign = mappedAlign;
   }
   for (const child of flow) {
+    if (!isElementFlowItem(child)) {
+      continue;
+    }
     if (Number.parseFloat(window.getComputedStyle(child).flexGrow) > 0) {
-      return null; // fill-in-wrap is unverified against Figma.
+      return { ok: false, reason: "wrap-with-grow" };
     }
   }
 
@@ -479,17 +447,9 @@ function inferWrapStack(
   const padRight = edge(style.borderRightWidth) + edge(style.paddingRight);
   const padBottom = edge(style.borderBottomWidth) + edge(style.paddingBottom);
 
-  // Group measured rects into rows by top edge (children of a row share it
-  // for the start/stretch alignments accepted above).
-  const rows: Array<Array<number>> = [];
-  let currentTop = Number.NEGATIVE_INFINITY;
-  childRects.forEach((rect, i) => {
-    if (Math.abs(rect.y - currentTop) > GEOMETRY_TOLERANCE) {
-      rows.push([]);
-      currentTop = rect.y;
-    }
-    (rows.at(-1) as Array<number>).push(i);
-  });
+  // Group measured rects into rows. With center/max cross-align, tops differ
+  // within a row; cluster by vertical overlap / proximity of midlines.
+  const rows = groupWrapRows(childRects);
 
   const inRowGaps: Array<number> = [];
   for (const row of rows) {
@@ -511,13 +471,27 @@ function inferWrapStack(
     return round2(inRowGaps.reduce((s, g) => s + g, 0) / inRowGaps.length);
   })();
   if (spacing === null) {
-    return null;
+    return { ok: false, reason: "wrap-nonuniform-gap" };
   }
 
-  const rowTops = rows.map((r) => (childRects[r[0] as number] as Rect).y);
   const rowHeights = rows.map((r) =>
     Math.max(...r.map((i) => (childRects[i] as Rect).height))
   );
+  const rowTops = rows.map((r, rowIndex) => {
+    const h = rowHeights[rowIndex] as number;
+    // Invert counter-align to recover the row box top from measured child tops.
+    const tops = r.map((i) => {
+      const rect = childRects[i] as Rect;
+      if (wrapCounterAlign === "CENTER") {
+        return rect.y - (h - rect.height) / 2;
+      }
+      if (wrapCounterAlign === "MAX") {
+        return rect.y - (h - rect.height);
+      }
+      return rect.y;
+    });
+    return Math.min(...tops);
+  });
   const rowGaps: Array<number> = [];
   for (let r = 1; r < rows.length; r += 1) {
     rowGaps.push(
@@ -537,52 +511,99 @@ function inferWrapStack(
     return round2(rowGaps.reduce((s, g) => s + g, 0) / rowGaps.length);
   })();
   if (counterSpacing === null || counterSpacing < -GEOMETRY_TOLERANCE) {
-    return null;
+    return { ok: false, reason: "wrap-nonuniform-gap" };
   }
 
-  // Simulate Figma's greedy packing; every child must land exactly where the
-  // browser put it.
+  // Free space above the first row / below the last becomes vertical padding
+  // (needed when a fixed-height line box is taller than the tallest child and
+  // align-items center/max offsets the whole row).
+  const measuredPadTop = rowTops[0] as number;
+  const lastIdx = rows.length - 1;
+  const measuredPadBottom =
+    parentSize.height -
+    ((rowTops[lastIdx] as number) + (rowHeights[lastIdx] as number));
+  if (
+    measuredPadTop < -GEOMETRY_TOLERANCE ||
+    measuredPadBottom < -GEOMETRY_TOLERANCE
+  ) {
+    return { ok: false, reason: "content-overflow" };
+  }
+  // CSS padding is a lower bound; measured free space may be larger.
+  if (measuredPadTop + GEOMETRY_TOLERANCE < padTop) {
+    return { ok: false, reason: "wrap-sim-mismatch" };
+  }
+  if (measuredPadBottom + GEOMETRY_TOLERANCE < padBottom) {
+    return { ok: false, reason: "wrap-sim-mismatch" };
+  }
+  const stackPadTop = round2(Math.max(measuredPadTop, 0));
+  const stackPadBottom = round2(Math.max(measuredPadBottom, 0));
+
+  // Simulate Figma's greedy packing with counter-axis MIN/CENTER/MAX.
+  // Row height is the max child height in the row; cross offset is applied
+  // inside that row box. Start at measured first-row top.
   const rightLimit = parentSize.width - padRight;
   let x = padLeft;
-  let y = padTop;
+  let y = stackPadTop;
   let simRowHeight = 0;
   let rowStart = true;
+  let rowItems: Array<Rect> = [];
+  const flushRowCheck = (items: Array<Rect>, rowTop: number, rowH: number) => {
+    let cx = padLeft;
+    for (const rect of items) {
+      let expectedY = rowTop;
+      if (wrapCounterAlign === "CENTER") {
+        expectedY = rowTop + (rowH - rect.height) / 2;
+      } else if (wrapCounterAlign === "MAX") {
+        expectedY = rowTop + (rowH - rect.height);
+      }
+      if (
+        Math.abs(rect.x - cx) > GEOMETRY_TOLERANCE ||
+        Math.abs(rect.y - expectedY) > GEOMETRY_TOLERANCE
+      ) {
+        return false;
+      }
+      cx += rect.width + spacing;
+    }
+    return true;
+  };
   for (const rect of childRects) {
     if (!rowStart && x + rect.width - rightLimit > GEOMETRY_TOLERANCE) {
+      if (!flushRowCheck(rowItems, y, simRowHeight)) {
+        return { ok: false, reason: "wrap-sim-mismatch" };
+      }
       y += simRowHeight + counterSpacing;
       x = padLeft;
       simRowHeight = 0;
+      rowItems = [];
     }
-    if (
-      Math.abs(rect.x - x) > GEOMETRY_TOLERANCE ||
-      Math.abs(rect.y - y) > GEOMETRY_TOLERANCE
-    ) {
-      return null;
-    }
+    rowItems.push(rect);
     x += rect.width + spacing;
     simRowHeight = Math.max(simRowHeight, rect.height);
     rowStart = false;
+  }
+  if (rowItems.length > 0 && !flushRowCheck(rowItems, y, simRowHeight)) {
+    return { ok: false, reason: "wrap-sim-mismatch" };
   }
 
   const spec: InferredStack = {
     stackMode: "HORIZONTAL",
     stackSpacing: spacing,
     stackPrimaryAlignItems: "MIN",
-    stackCounterAlignItems: "MIN",
+    stackCounterAlignItems: wrapCounterAlign,
     stackPrimarySizing: "FIXED",
     stackCounterSizing: "FIXED",
     stackHorizontalPadding: round2(padLeft),
-    stackVerticalPadding: round2(padTop),
+    stackVerticalPadding: stackPadTop,
     stackPaddingRight: round2(padRight),
-    stackPaddingBottom: round2(padBottom),
+    stackPaddingBottom: stackPadBottom,
     stackWrap: "WRAP",
     stackCounterSpacing: counterSpacing,
   };
 
   // Counter-axis hug: rows content height equals the frame height.
   const contentHeight =
-    padTop +
-    padBottom +
+    stackPadTop +
+    stackPadBottom +
     rowHeights.reduce((n, h) => n + h, 0) +
     counterSpacing * (rows.length - 1);
   if (
@@ -592,7 +613,7 @@ function inferWrapStack(
     spec.stackCounterSizing = "RESIZE_TO_FIT";
   }
 
-  return { stack: spec, childOverrides: new Map() };
+  return { ok: true, value: { stack: spec, childOverrides: new Map() } };
 }
 
 /**
@@ -605,22 +626,29 @@ function inferWrapStack(
  * CENTER / MAX reproduces the measured geometry — CENTER covers
  * `margin: 0 auto` centering.
  */
-function inferBlockStack(input: StackInferenceInput): StackInference | null {
+function inferBlockStack(
+  input: StackInferenceInput
+):
+  | { ok: true; value: StackInference }
+  | { ok: false; reason: LayoutInferBailReason } {
   const { element, style, flow, childRects, parentSize } = input;
 
   for (const child of flow) {
+    if (!isElementFlowItem(child)) {
+      return { ok: false, reason: "block-inline-child" };
+    }
     const childStyle = window.getComputedStyle(child);
     if (!BLOCK_LEVEL_DISPLAYS.has(childStyle.display)) {
-      return null; // Inline flow — not representable as a stack.
+      return { ok: false, reason: "block-inline-child" };
     }
     if (childStyle.float !== "none") {
-      return null;
+      return { ok: false, reason: "float-child" };
     }
   }
 
   const spacing = uniformGap(childRects, false);
   if (spacing === null) {
-    return null;
+    return { ok: false, reason: "non-uniform-gap" };
   }
 
   const first = childRects[0] as Rect;
@@ -628,7 +656,7 @@ function inferBlockStack(input: StackInferenceInput): StackInference | null {
   const padTop = first.y;
   const padBottom = parentSize.height - (last.y + last.height);
   if (padTop < -GEOMETRY_TOLERANCE || padBottom < -GEOMETRY_TOLERANCE) {
-    return null; // Content overflows the frame; a stack would clip/shift it.
+    return { ok: false, reason: "content-overflow" };
   }
 
   const padLeft = edge(style.borderLeftWidth) + edge(style.paddingLeft);
@@ -651,13 +679,17 @@ function inferBlockStack(input: StackInferenceInput): StackInference | null {
       continue;
     }
 
+    const elementFlow = flow.filter(isElementFlowItem);
     applySizingModes({
       element,
       style,
       spec,
       parent: parentSize,
-      children: flow,
-      childRects,
+      children: elementFlow,
+      childRects: elementFlow.map((child) => {
+        const i = flow.indexOf(child);
+        return childRects[i] as Rect;
+      }),
       isRow: false,
     });
 
@@ -666,6 +698,9 @@ function inferBlockStack(input: StackInferenceInput): StackInference | null {
     const childOverrides = new Map<Element, InferredChildStack>();
     const innerWidth = parentSize.width - padLeft - padRight;
     flow.forEach((child, i) => {
+      if (!isElementFlowItem(child)) {
+        return;
+      }
       if (
         hasContentSizedKeyword(child, "width") &&
         Math.abs((childRects[i] as Rect).width - innerWidth) <=
@@ -675,535 +710,10 @@ function inferBlockStack(input: StackInferenceInput): StackInference | null {
       }
     });
 
-    return { stack: spec, childOverrides };
+    return { ok: true, value: { stack: spec, childOverrides } };
   }
 
-  return null;
-}
-
-/**
- * Best-effort flex stack: keep auto-layout on the parent, mark children that
- * don't sit on the reconstructed stack line as `stackPositioning: ABSOLUTE`
- * (in the frame but not controlled by auto-layout). Preserves visual structure
- * while maximizing bottom-level stacks.
- */
-/** Auto-layout shell for leaf flex/block with only text (no element children). */
-function inferLeafShellStack(
-  _element: Element,
-  style: CSSStyleDeclaration,
-  isFlex: boolean
-): StackInference | null {
-  const direction = isFlex ? style.flexDirection || "row" : "column";
-  const isRow = isFlex
-    ? direction === "row" || direction === "row-reverse"
-    : false;
-  const reversed = isFlex && direction.endsWith("-reverse");
-  let justify = isFlex ? (JUSTIFY_MAP[style.justifyContent] ?? "MIN") : "MIN";
-  const align = isFlex ? (ALIGN_MAP[style.alignItems] ?? "CENTER") : "MIN";
-  if (reversed && justify === "MIN") {
-    justify = "MAX";
-  } else if (reversed && justify === "MAX") {
-    justify = "MIN";
-  }
-
-  const gap = isFlex ? (readCssGap(style, isRow) ?? 0) : 0;
-
-  const stack: InferredStack = {
-    stackMode: isRow ? "HORIZONTAL" : "VERTICAL",
-    stackSpacing: Math.max(0, gap),
-    stackPrimaryAlignItems: justify,
-    stackCounterAlignItems: align,
-    stackPrimarySizing: "FIXED",
-    stackCounterSizing: "FIXED",
-    stackHorizontalPadding: round2(
-      edge(style.borderLeftWidth) + edge(style.paddingLeft)
-    ),
-    stackVerticalPadding: round2(
-      edge(style.borderTopWidth) + edge(style.paddingTop)
-    ),
-    stackPaddingRight: round2(
-      edge(style.borderRightWidth) + edge(style.paddingRight)
-    ),
-    stackPaddingBottom: round2(
-      edge(style.borderBottomWidth) + edge(style.paddingBottom)
-    ),
-    ...(reversed && { stackReverseZIndex: true }),
-  };
-
-  return {
-    stack,
-    childOverrides: new Map(),
-    reverseChildren: reversed || undefined,
-  };
-}
-
-function inferFlexStackWithOutliers(
-  input: StackInferenceInput
-): StackInference | null {
-  const { element, style, flow, childRects, parentSize } = input;
-  if (flow.length === 0) {
-    return null;
-  }
-
-  const direction = style.flexDirection;
-  const isRow = direction === "row" || direction === "row-reverse";
-  const reversed = direction.endsWith("-reverse");
-
-  let justify = JUSTIFY_MAP[style.justifyContent] ?? "MIN";
-  const align = ALIGN_MAP[style.alignItems] ?? "MIN";
-  if (reversed && justify === "MIN") {
-    justify = "MAX";
-  } else if (reversed && justify === "MAX") {
-    justify = "MIN";
-  }
-
-  // Work in visual order for reverse flex.
-  const order = reversed
-    ? flow.map((_, i) => i).reverse()
-    : flow.map((_, i) => i);
-  let active = order.slice();
-
-  const padLeft = edge(style.borderLeftWidth) + edge(style.paddingLeft);
-  const padTop = edge(style.borderTopWidth) + edge(style.paddingTop);
-  const padRight = edge(style.borderRightWidth) + edge(style.paddingRight);
-  const padBottom = edge(style.borderBottomWidth) + edge(style.paddingBottom);
-
-  const cssGap = readCssGap(style, isRow);
-
-  // Iteratively drop the worst outlier until geometry verifies or too few left.
-  let attemptsLeft = flow.length;
-  while (attemptsLeft > 0) {
-    attemptsLeft -= 1;
-    if (active.length === 0) {
-      return null;
-    }
-    const activeRects = active.map((i) => childRects[i] as Rect);
-    const spacing = cssGap ?? averageGap(activeRects, isRow) ?? 0;
-
-    const spec: InferredStack = {
-      stackMode: isRow ? "HORIZONTAL" : "VERTICAL",
-      stackSpacing: spacing,
-      stackPrimaryAlignItems: justify,
-      stackCounterAlignItems: align,
-      stackPrimarySizing: "FIXED",
-      stackCounterSizing: "FIXED",
-      stackHorizontalPadding: round2(padLeft),
-      stackVerticalPadding: round2(padTop),
-      stackPaddingRight: round2(padRight),
-      stackPaddingBottom: round2(padBottom),
-      ...(reversed && { stackReverseZIndex: true }),
-    };
-
-    if (verifyGeometry(spec, parentSize, activeRects)) {
-      const absCount = flow.length - active.length;
-      // Hierarchy: only park true outliers. If too many go absolute, the
-      // "auto-layout" shell is misleading — refuse and leave parent absolute.
-      if (
-        absCount > 0 &&
-        (active.length < 2 || absCount > Math.ceil(flow.length / 3))
-      ) {
-        // keep trying with fewer, or fail
-      } else {
-        const activeSet = new Set(active);
-        const childOverrides = new Map<Element, InferredChildStack>();
-        for (let i = 0; i < flow.length; i += 1) {
-          if (!activeSet.has(i)) {
-            childOverrides.set(flow[i] as Element, {
-              stackPositioning: "ABSOLUTE",
-            });
-          }
-        }
-
-        const activeChildren = active.map((i) => flow[i] as Element);
-        applySizingModes({
-          element,
-          style,
-          spec,
-          parent: parentSize,
-          children: activeChildren,
-          childRects: activeRects,
-          isRow,
-        });
-
-        const growStretch = inferChildOverrides({
-          element,
-          children: activeChildren,
-          childRects: activeRects,
-          parentStyle: style,
-          spec,
-          parentSize,
-          isRow,
-        });
-        for (const [el, ov] of growStretch) {
-          childOverrides.set(el, { ...childOverrides.get(el), ...ov });
-        }
-
-        return {
-          stack: spec,
-          childOverrides,
-          reverseChildren: reversed || undefined,
-        };
-      }
-    }
-
-    // Drop the child with the largest primary-axis error vs expected cursor.
-    if (active.length <= 1) {
-      // Single remaining child: accept as 1-item stack (padding/alignment).
-      if (active.length === 1) {
-        const onlyRects = active.map((i) => childRects[i] as Rect);
-        const spacing0 = 0;
-        const spec1: InferredStack = {
-          stackMode: isRow ? "HORIZONTAL" : "VERTICAL",
-          stackSpacing: spacing0,
-          stackPrimaryAlignItems: justify,
-          stackCounterAlignItems: align,
-          stackPrimarySizing: "FIXED",
-          stackCounterSizing: "FIXED",
-          stackHorizontalPadding: round2(padLeft),
-          stackVerticalPadding: round2(padTop),
-          stackPaddingRight: round2(padRight),
-          stackPaddingBottom: round2(padBottom),
-          ...(reversed && { stackReverseZIndex: true }),
-        };
-        // Force pads from the single child's measured position if tighter.
-        if (isRow) {
-          spec1.stackHorizontalPadding = round2(Math.max(0, onlyRects[0]?.x));
-          spec1.stackPaddingRight = round2(
-            Math.max(
-              0,
-              parentSize.width - (onlyRects[0]?.x + onlyRects[0]?.width)
-            )
-          );
-        } else {
-          spec1.stackVerticalPadding = round2(Math.max(0, onlyRects[0]?.y));
-          spec1.stackPaddingBottom = round2(
-            Math.max(
-              0,
-              parentSize.height - (onlyRects[0]?.y + onlyRects[0]?.height)
-            )
-          );
-        }
-        if (verifyGeometry(spec1, parentSize, onlyRects)) {
-          const childOverrides = new Map<Element, InferredChildStack>();
-          const activeSet = new Set(active);
-          for (let i = 0; i < flow.length; i += 1) {
-            if (!activeSet.has(i)) {
-              childOverrides.set(flow[i] as Element, {
-                stackPositioning: "ABSOLUTE",
-              });
-            }
-          }
-          return {
-            stack: spec1,
-            childOverrides,
-            reverseChildren: reversed || undefined,
-          };
-        }
-      }
-      return null;
-    }
-
-    const worst = worstPrimaryOutlierIndex(
-      active,
-      activeRects,
-      isRow,
-      justify,
-      align,
-      {
-        padLeading: isRow ? padLeft : padTop,
-        padTrailing: isRow ? padRight : padBottom,
-        padCross: isRow ? padTop : padLeft,
-        padCrossTrailing: isRow ? padBottom : padRight,
-        spacing,
-        parentSize,
-      }
-    );
-    if (worst < 0) {
-      // No single culprit — drop last item as weak heuristic.
-      active = active.slice(0, -1);
-    } else {
-      active = active.filter((i) => i !== worst);
-    }
-  }
-
-  return null;
-}
-
-function inferBlockStackWithOutliers(
-  input: StackInferenceInput
-): StackInference | null {
-  const { element, style, flow, childRects, parentSize } = input;
-  if (flow.length === 0) {
-    return null;
-  }
-
-  // Only block-level non-float children can stay in the stack; others absolute.
-  const eligible: Array<number> = [];
-  const forcedAbs: Array<number> = [];
-  flow.forEach((child, i) => {
-    const childStyle = window.getComputedStyle(child);
-    if (
-      !BLOCK_LEVEL_DISPLAYS.has(childStyle.display) ||
-      childStyle.float !== "none"
-    ) {
-      forcedAbs.push(i);
-    } else {
-      eligible.push(i);
-    }
-  });
-  if (eligible.length === 0) {
-    return null;
-  }
-
-  let active = eligible.slice();
-  let attemptsLeft = flow.length;
-  while (attemptsLeft > 0) {
-    attemptsLeft -= 1;
-    if (active.length === 0) {
-      return null;
-    }
-    const activeRects = active.map((i) => childRects[i] as Rect);
-    const spacing = averageGap(activeRects, false);
-    if (spacing === null && active.length > 1) {
-      // Drop largest gap jump
-      let dropAt = 1;
-      let worstJump = -1;
-      for (let k = 1; k < activeRects.length; k += 1) {
-        const prev = activeRects[k - 1];
-        const cur = activeRects[k];
-        if (!(prev && cur)) {
-          continue;
-        }
-        const g = cur.y - (prev.y + prev.height);
-        if (Math.abs(g) > worstJump) {
-          worstJump = Math.abs(g);
-          dropAt = k;
-        }
-      }
-      active = active.filter((_, idx) => idx !== dropAt);
-      continue;
-    }
-
-    const first = activeRects[0] as Rect;
-    const last = activeRects.at(-1) as Rect;
-    const padTop = first.y;
-    const padBottom = parentSize.height - (last.y + last.height);
-    if (padTop < -GEOMETRY_TOLERANCE || padBottom < -GEOMETRY_TOLERANCE) {
-      // Overflowing content: drop first or last
-      if (padTop < -GEOMETRY_TOLERANCE && active.length > 1) {
-        active = active.slice(1);
-        continue;
-      }
-      if (padBottom < -GEOMETRY_TOLERANCE && active.length > 1) {
-        active = active.slice(0, -1);
-        continue;
-      }
-      return null;
-    }
-
-    const padLeft = edge(style.borderLeftWidth) + edge(style.paddingLeft);
-    const padRight = edge(style.borderRightWidth) + edge(style.paddingRight);
-    const space = spacing ?? 0;
-
-    for (const align of ["MIN", "CENTER", "MAX"] as const) {
-      const spec: InferredStack = {
-        stackMode: "VERTICAL",
-        stackSpacing: space,
-        stackPrimaryAlignItems: "MIN",
-        stackCounterAlignItems: align,
-        stackPrimarySizing: "FIXED",
-        stackCounterSizing: "FIXED",
-        stackHorizontalPadding: round2(padLeft),
-        stackVerticalPadding: round2(Math.max(padTop, 0)),
-        stackPaddingRight: round2(padRight),
-        stackPaddingBottom: round2(Math.max(padBottom, 0)),
-      };
-      if (!verifyGeometry(spec, parentSize, activeRects)) {
-        continue;
-      }
-
-      const activeSet = new Set(active);
-      const childOverrides = new Map<Element, InferredChildStack>();
-      for (const i of forcedAbs) {
-        childOverrides.set(flow[i] as Element, {
-          stackPositioning: "ABSOLUTE",
-        });
-      }
-      for (let i = 0; i < flow.length; i += 1) {
-        if (!(activeSet.has(i) || forcedAbs.includes(i))) {
-          childOverrides.set(flow[i] as Element, {
-            stackPositioning: "ABSOLUTE",
-          });
-        }
-      }
-
-      const activeChildren = active.map((i) => flow[i] as Element);
-      applySizingModes({
-        element,
-        style,
-        spec,
-        parent: parentSize,
-        children: activeChildren,
-        childRects: activeRects,
-        isRow: false,
-      });
-
-      const innerWidth = parentSize.width - padLeft - padRight;
-      activeChildren.forEach((child, idx) => {
-        if (
-          hasContentSizedKeyword(child, "width") &&
-          Math.abs((activeRects[idx] as Rect).width - innerWidth) <=
-            GEOMETRY_TOLERANCE
-        ) {
-          childOverrides.set(child, {
-            ...childOverrides.get(child),
-            stackChildAlignSelf: "STRETCH",
-          });
-        }
-      });
-
-      const absCount = flow.length - active.length;
-      if (
-        absCount > 0 &&
-        (active.length < 2 || absCount > Math.ceil(flow.length / 3))
-      ) {
-        continue;
-      }
-
-      return { stack: spec, childOverrides };
-    }
-
-    // No align worked — drop worst vertical outlier
-    if (active.length <= 1) {
-      return null;
-    }
-    const worst = worstPrimaryOutlierIndex(
-      active,
-      activeRects,
-      false,
-      "MIN",
-      "MIN",
-      {
-        padLeading: Math.max(padTop, 0),
-        padTrailing: Math.max(padBottom, 0),
-        padCross: padLeft,
-        padCrossTrailing: padRight,
-        spacing: space,
-        parentSize,
-      }
-    );
-    active =
-      worst < 0 ? active.slice(0, -1) : active.filter((i) => i !== worst);
-  }
-  return null;
-}
-
-function readCssGap(style: CSSStyleDeclaration, isRow: boolean): number | null {
-  const raw = isRow ? style.columnGap || style.gap : style.rowGap || style.gap;
-  if (!raw || raw === "normal") {
-    return null;
-  }
-  const n = Number.parseFloat(raw);
-  return Number.isFinite(n) ? round2(n) : null;
-}
-
-function averageGap(
-  childRects: ReadonlyArray<Rect>,
-  isRow: boolean
-): number | null {
-  if (childRects.length <= 1) {
-    return 0;
-  }
-  const gaps: Array<number> = [];
-  for (let i = 1; i < childRects.length; i += 1) {
-    const prev = childRects[i - 1] as Rect;
-    const next = childRects[i] as Rect;
-    gaps.push(
-      isRow ? next.x - (prev.x + prev.width) : next.y - (prev.y + prev.height)
-    );
-  }
-  const min = Math.min(...gaps);
-  const max = Math.max(...gaps);
-  // For outlier mode allow larger spread; caller already drops outliers.
-  if (max - min > GAP_SPREAD_TOLERANCE * 3) {
-    return null;
-  }
-  return round2(gaps.reduce((s, g) => s + g, 0) / gaps.length);
-}
-
-function worstPrimaryOutlierIndex(
-  active: ReadonlyArray<number>,
-  activeRects: ReadonlyArray<Rect>,
-  isRow: boolean,
-  justify: StackJustifyValue,
-  align: StackAlignValue,
-  pads: {
-    padLeading: number;
-    padTrailing: number;
-    padCross: number;
-    padCrossTrailing: number;
-    spacing: number;
-    parentSize: { width: number; height: number };
-  }
-): number {
-  const {
-    padLeading,
-    padTrailing,
-    padCross,
-    padCrossTrailing,
-    spacing,
-    parentSize,
-  } = pads;
-  const primarySize = (rect: Rect) => (isRow ? rect.width : rect.height);
-  const crossSize = (rect: Rect) => (isRow ? rect.height : rect.width);
-  const inner =
-    (isRow ? parentSize.width : parentSize.height) - padLeading - padTrailing;
-  const innerCross =
-    (isRow ? parentSize.height : parentSize.width) -
-    padCross -
-    padCrossTrailing;
-  const totalChildren = activeRects.reduce((n, r) => n + primarySize(r), 0);
-  const count = activeRects.length;
-
-  let useSpacing = spacing;
-  let cursor = padLeading;
-  switch (justify) {
-    case "CENTER":
-      cursor += (inner - totalChildren - useSpacing * (count - 1)) / 2;
-      break;
-    case "MAX":
-      cursor += inner - totalChildren - useSpacing * (count - 1);
-      break;
-    case "SPACE_BETWEEN":
-      useSpacing = count > 1 ? (inner - totalChildren) / (count - 1) : 0;
-      break;
-    default:
-      break;
-  }
-
-  let worstIdx = -1;
-  let worstErr = -1;
-  for (let k = 0; k < activeRects.length; k += 1) {
-    const rect = activeRects[k] as Rect;
-    const expectedPrimary = cursor;
-    let expectedCross = padCross;
-    if (align === "CENTER") {
-      expectedCross += (innerCross - crossSize(rect)) / 2;
-    } else if (align === "MAX") {
-      expectedCross += innerCross - crossSize(rect);
-    }
-    const actualPrimary = isRow ? rect.x : rect.y;
-    const actualCross = isRow ? rect.y : rect.x;
-    const err =
-      Math.abs(actualPrimary - expectedPrimary) +
-      Math.abs(actualCross - expectedCross);
-    if (err > worstErr) {
-      worstErr = err;
-      worstIdx = active[k] as number;
-    }
-    cursor += primarySize(rect) + useSpacing;
-  }
-  return worstErr > GEOMETRY_TOLERANCE ? worstIdx : -1;
+  return { ok: false, reason: "verify-geometry-failed" };
 }
 
 /** Uniform inter-child gap along the given axis, or null when non-uniform.
@@ -1471,38 +981,123 @@ function isContentDrivenSize(
 }
 
 /**
- * Split element children into layout participants (`flow`) and absolutely
- * positioned ones (which become `stackPositioning: "ABSOLUTE"`), or `null`
- * when the container holds something we don't model yet (text-node flow
- * items, `order`).
+ * Split children into layout participants (`flow`: elements + non-empty text)
+ * and absolutely positioned elements. Text nodes participate so flex/grid
+ * captions like `· label` can still become stacks when geometry verifies.
  */
+
+/**
+ * True when numeric z-index among flow elements would change paint/layout
+ * order relative to DOM order. Relative/sticky with z-auto is ignored.
+ */
+function flowHasNumericZIndexReorder(flow: ReadonlyArray<FlowItem>): boolean {
+  type Keyed = { index: number; z: number; positioned: boolean };
+  const keyed: Array<Keyed> = [];
+  flow.forEach((item, index) => {
+    if (!isElementFlowItem(item)) {
+      keyed.push({ index, z: 0, positioned: false });
+      return;
+    }
+    const style = window.getComputedStyle(item);
+    const position = style.position;
+    const isPositioned =
+      position === "absolute" ||
+      position === "relative" ||
+      position === "fixed" ||
+      position === "sticky";
+    const zRaw = style.zIndex;
+    const hasNumericZ = zRaw !== "auto" && zRaw !== "";
+    const z = hasNumericZ ? Number.parseInt(zRaw, 10) || 0 : 0;
+    // Only numeric z-index on positioned elements participates in reorder.
+    keyed.push({
+      index,
+      z: isPositioned && hasNumericZ ? z : 0,
+      positioned: isPositioned && hasNumericZ,
+    });
+  });
+  if (!keyed.some((k) => k.positioned)) {
+    return false;
+  }
+  // Sort like stacking among those with numeric z; others keep DOM order
+  // relative to each other (stable).
+  const sorted = [...keyed].sort((a, b) => {
+    if ((a.positioned || b.positioned) && a.z !== b.z) {
+      return a.z - b.z;
+    }
+    return a.index - b.index;
+  });
+  return sorted.some((k, i) => k.index !== i);
+}
+
+/**
+ * Cluster wrap children into rows. Prefer shared recovered row-top when
+ * heights differ under center/max alignment: items belong to the same row
+ * when their vertical ranges overlap substantially.
+ */
+function groupWrapRows(childRects: ReadonlyArray<Rect>): Array<Array<number>> {
+  if (childRects.length === 0) {
+    return [];
+  }
+  const rows: Array<Array<number>> = [];
+  let current: Array<number> = [0];
+  let rowTop = (childRects[0] as Rect).y;
+  let rowBottom = (childRects[0] as Rect).y + (childRects[0] as Rect).height;
+
+  for (let i = 1; i < childRects.length; i += 1) {
+    const rect = childRects[i] as Rect;
+    const overlaps =
+      rect.y < rowBottom - GEOMETRY_TOLERANCE &&
+      rect.y + rect.height > rowTop + GEOMETRY_TOLERANCE;
+    // Also treat nearly-equal tops as same row (MIN align).
+    const sameTop = Math.abs(rect.y - rowTop) <= GEOMETRY_TOLERANCE;
+    if (overlaps || sameTop) {
+      current.push(i);
+      rowTop = Math.min(rowTop, rect.y);
+      rowBottom = Math.max(rowBottom, rect.y + rect.height);
+    } else {
+      rows.push(current);
+      current = [i];
+      rowTop = rect.y;
+      rowBottom = rect.y + rect.height;
+    }
+  }
+  rows.push(current);
+  return rows;
+}
+
 function collectChildren(
   element: Element
-): { flow: Array<Element>; absolute: Array<Element> } | null {
-  // Direct text nodes are emitted as TEXT layers by the walker. They used to
-  // hard-bail the whole stack (killing bottom-level chips/buttons). We ignore
-  // them for element flow classification; geometry paths tolerate them via
-  // outlier / all-absolute fallbacks.
-  const flow: Array<Element> = [];
+):
+  | { ok: true; flow: Array<FlowItem>; absolute: Array<Element> }
+  | { ok: false; reason: LayoutInferBailReason } {
+  const flow: Array<FlowItem> = [];
   const absolute: Array<Element> = [];
-  for (const child of element.children) {
+
+  for (const node of element.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      if ((node.textContent ?? "").trim()) {
+        flow.push(node as Text);
+      }
+      continue;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      continue;
+    }
+    const child = node as Element;
     const style = window.getComputedStyle(child);
     if (style.display === "none") {
-      continue; // Takes no space and the walker skips it too.
+      continue;
     }
     if (style.position === "absolute" || style.position === "fixed") {
       absolute.push(child);
       continue;
     }
-    // Non-default `order` breaks DOM≈visual order for stacks — park as
-    // absolute so the rest of the container can still become auto-layout.
     if (style.order !== "0") {
-      absolute.push(child);
-      continue;
+      return { ok: false, reason: "order-nonzero" };
     }
     flow.push(child);
   }
-  return { flow, absolute };
+  return { ok: true, flow, absolute };
 }
 
 /**

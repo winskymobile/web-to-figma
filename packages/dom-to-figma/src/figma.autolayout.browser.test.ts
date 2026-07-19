@@ -21,6 +21,11 @@ const convertScene = async (
   html: string,
   layout: ConverterLayout = "auto"
 ): Promise<ReadonlyArray<FigmaNodeChange>> => {
+  const result = await convertSceneFull(html, layout);
+  return result.document.nodeChanges;
+};
+
+const convertSceneFull = (html: string, layout: ConverterLayout = "auto") => {
   const wrapper = document.createElement("div");
   // Sized larger than any scene so the legacy fill heuristics (which fire
   // when an element matches its parent's size) never trigger on the scene
@@ -35,8 +40,7 @@ const convertScene = async (
     layout,
     fontLoader: createTestFontLoader(),
   });
-  const result = await figma.convert({ element, width: 400, height: 300 });
-  return result.document.nodeChanges;
+  return figma.convert({ element, width: 400, height: 300 });
 };
 
 // The converted element is always the first walked node: localID 3
@@ -354,14 +358,36 @@ describe("auto-layout fallbacks (stackMode stays NONE)", () => {
     expectNone(changes);
   });
 
-  it("bails on direct text-node flex items", async () => {
+  it("converts flex rows that mix direct text nodes with boxes", async () => {
     const changes = await convertScene(
-      `<div style="width:320px;height:200px;display:flex;font-family:monospace">
-        plain text item
-        <div style="width:100px;height:80px"></div>
+      `<div style="width:320px;height:80px;display:flex;align-items:center;gap:8px;padding:8px;box-sizing:border-box;font-family:${TEST_FONT_FAMILY}">
+        <span style="display:inline-block;width:8px;height:8px;background:#0f0;flex:0 0 auto"></span>
+        label text
       </div>`
     );
-    expectNone(changes);
+    // span + text node with uniform gap should verify as HORIZONTAL
+    expect(byLocalId(changes, CONTAINER_LOCAL_ID)?.stackMode).toBe(
+      "HORIZONTAL"
+    );
+  });
+
+  it("reports layout-infer-bailed with a stable reason", async () => {
+    const result = await convertSceneFull(
+      `<div style="width:320px;height:200px;display:flex">
+        <div style="width:60px;height:40px;margin-right:8px"></div>
+        <div style="width:60px;height:40px;margin-right:24px"></div>
+        <div style="width:60px;height:40px"></div>
+      </div>`
+    );
+    expect(
+      byLocalId(result.document.nodeChanges, CONTAINER_LOCAL_ID)?.stackMode
+    ).toBe("NONE");
+    expect(
+      result.diagnostics.some(
+        (d) =>
+          d.code === "layout-infer-bailed" && d.reason === "non-uniform-gap"
+      )
+    ).toBe(true);
   });
 
   it("bails on non-uniform block margins", async () => {
@@ -543,6 +569,37 @@ describe("wrap, reverse, and grid", () => {
       stackPrimaryAlignItems: "MAX",
     });
     expect(byLocalId(changes, CONTAINER_LOCAL_ID + 1)?.size?.y).toBe(60);
+  });
+
+  it("converts flex-wrap with align-items center", async () => {
+    const changes = await convertScene(
+      `<div style="width:320px;height:40px;display:flex;flex-wrap:wrap;align-items:center;gap:6px">
+        <div style="width:68px;height:28px"></div>
+        <div style="width:15px;height:18px"></div>
+        <div style="width:82px;height:28px"></div>
+        <div style="width:15px;height:18px"></div>
+        <div style="width:72px;height:28px"></div>
+      </div>`
+    );
+    expect(byLocalId(changes, CONTAINER_LOCAL_ID)).toMatchObject({
+      stackMode: "HORIZONTAL",
+      stackWrap: "WRAP",
+      stackSpacing: 6,
+      stackCounterAlignItems: "CENTER",
+    });
+  });
+
+  it("converts block figure with position:relative child", async () => {
+    const changes = await convertScene(
+      `<figure style="width:180px;margin:0;padding:0">
+        <div style="position:relative;width:180px;height:100px;background:#ccc"></div>
+        <figcaption style="display:block;margin-top:7px;height:16px">caption</figcaption>
+      </figure>`
+    );
+    expect(byLocalId(changes, CONTAINER_LOCAL_ID)).toMatchObject({
+      stackMode: "VERTICAL",
+      stackSpacing: 7,
+    });
   });
 
   it("converts a uniform grid into a wrapped stack", async () => {

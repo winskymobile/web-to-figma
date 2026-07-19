@@ -10,8 +10,9 @@ import {
 type PreviewStageProps = {
   html: string | null;
   title: string;
-  /** Logical CSS width for reflow (375 mobile / 1440 PC). */
+  /** Logical CSS width for reflow (mobile presets / PC presets; defaults 375 / 1440). */
   logicalWidth: number;
+  interactionDisabled: boolean;
   onReadyChange?: (ready: boolean) => void;
   onRequestHtmlPick: () => void;
   onDropHtmlFile: (file: File) => void;
@@ -23,6 +24,7 @@ export const PreviewStage = forwardRef<HTMLIFrameElement, PreviewStageProps>(
       html,
       title,
       logicalWidth,
+      interactionDisabled,
       onReadyChange,
       onRequestHtmlPick,
       onDropHtmlFile,
@@ -79,6 +81,12 @@ export const PreviewStage = forwardRef<HTMLIFrameElement, PreviewStageProps>(
       []
     );
 
+    useEffect(() => {
+      if (interactionDisabled) {
+        setDragOver(false);
+      }
+    }, [interactionDisabled]);
+
     // Reflow height when logical width or document changes.
     useEffect(() => {
       const iframe = iframeRef.current;
@@ -93,7 +101,7 @@ export const PreviewStage = forwardRef<HTMLIFrameElement, PreviewStageProps>(
 
     const onDrag = (e: DragEvent, over: boolean) => {
       e.preventDefault();
-      if (html) {
+      if (html || interactionDisabled) {
         return;
       }
       setDragOver(over);
@@ -102,7 +110,7 @@ export const PreviewStage = forwardRef<HTMLIFrameElement, PreviewStageProps>(
     const onDrop = (e: DragEvent) => {
       e.preventDefault();
       setDragOver(false);
-      if (html) {
+      if (html || interactionDisabled) {
         return;
       }
       const file = e.dataTransfer.files?.[0];
@@ -136,7 +144,7 @@ export const PreviewStage = forwardRef<HTMLIFrameElement, PreviewStageProps>(
         {src ? (
           <div className="flex min-h-full justify-center p-4">
             <div
-              className="relative shrink-0 overflow-hidden border border-[var(--line)] bg-white shadow-[0_8px_28px_rgb(0_0_0/0.08)]"
+              className="relative shrink-0 overflow-hidden bg-white shadow-[0_8px_28px_rgb(0_0_0/0.08)] outline outline-1 outline-[var(--line)]"
               style={{ width: logicalWidth, height: frameHeight }}
             >
               <iframe
@@ -161,7 +169,8 @@ export const PreviewStage = forwardRef<HTMLIFrameElement, PreviewStageProps>(
           <div className="pointer-events-none absolute inset-0 grid place-items-center p-6">
             <button
               aria-label="选择 HTML 文件"
-              className="group pointer-events-auto grid cursor-pointer content-center justify-items-center gap-3 border-0 bg-transparent px-2 py-2 text-center font-[inherit] text-[var(--muted)] transition-colors duration-150 hover:text-[var(--ink)] focus-visible:text-[var(--ink)] focus-visible:outline-none"
+              className="group pointer-events-auto grid cursor-pointer content-center justify-items-center gap-3 border-0 bg-transparent px-2 py-2 text-center font-[inherit] text-[var(--muted)] transition-colors duration-150 hover:enabled:text-[var(--ink)] focus-visible:text-[var(--ink)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={interactionDisabled}
               onClick={onRequestHtmlPick}
               type="button"
             >

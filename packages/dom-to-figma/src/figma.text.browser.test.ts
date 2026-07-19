@@ -7,10 +7,40 @@ import {
   loadTestFontIntoBrowser,
   TEST_FONT_FAMILY,
 } from "./__fixtures__/loaders";
+import type { FontFile, FontLoader, FontProperties } from "./figma";
 import { createFigmaConverter } from "./figma";
 
 const FRAME_WIDTH = 320;
 const FRAME_HEIGHT = 80;
+const FULL_INTER_REGULAR_URL =
+  "https://cdn.jsdelivr.net/gh/rsms/inter@v4.1/docs/font-files/Inter-Regular.woff2";
+
+let fullInterRegular: Promise<ArrayBuffer> | undefined;
+
+function createFullInterFallbackLoader(): FontLoader {
+  const primaryLoader = createTestFontLoader();
+  return async (request): Promise<FontFile> => {
+    if (request.family.trim().toLowerCase() !== "inter") {
+      return primaryLoader(request);
+    }
+
+    fullInterRegular ??= fetch(FULL_INTER_REGULAR_URL).then((response) => {
+      if (!response.ok) {
+        throw new Error(
+          `Failed to fetch pinned full Inter fixture (${response.status}): ${FULL_INTER_REGULAR_URL}`
+        );
+      }
+      return response.arrayBuffer();
+    });
+
+    return {
+      bytes: await fullInterRegular,
+      resolvedWeight: 400,
+      resolvedItalic: false,
+      resolvedFamily: "Inter",
+    };
+  };
+}
 
 const mountElement = (html: string): HTMLElement => {
   const wrapper = document.createElement("div");
@@ -226,5 +256,161 @@ describe("text rendering with Inter", () => {
     // silently corrupted.
     const glyphs = textChange.derivedTextData?.glyphs ?? [];
     expect(glyphs).toHaveLength("office affinity".length);
+  });
+});
+
+describe("font fallback diagnostics", () => {
+  it("requests an italic symbol-fallback face for italic text", async () => {
+    const requests: Array<FontProperties> = [];
+    const delegate = createFullInterFallbackLoader();
+    const fontLoader: FontLoader = (request) => {
+      requests.push({ ...request });
+      return delegate(request);
+    };
+    const element = mountElement(
+      `<div style="width:${FRAME_WIDTH}px;height:${FRAME_HEIGHT}px;font-family:'${TEST_FONT_FAMILY}',sans-serif;font-size:24px;font-style:italic">A→</div>`
+    );
+
+    const figma = createFigmaConverter({ fontLoader });
+    await figma.convert({
+      element,
+      width: FRAME_WIDTH,
+      height: FRAME_HEIGHT,
+    });
+
+    expect(requests).toContainEqual({
+      family: "Inter",
+      weight: 400,
+      italic: true,
+      purpose: "symbol-fallback",
+    });
+  });
+
+  it("reports cached loader degradation once per conversion", async () => {
+    const pageFontDiagnostic = {
+      code: "page-font-fetch-failed" as const,
+      severity: "warning" as const,
+      message: "Page font fetch failed; configured fallback used.",
+    };
+    const fixtureLoader = createTestFontLoader();
+    const fontLoader: FontLoader = async (request) => {
+      const file = await fixtureLoader(request);
+      return request.family === TEST_FONT_FAMILY
+        ? { ...file, diagnostics: [pageFontDiagnostic] }
+        : file;
+    };
+    const figma = createFigmaConverter({ fontLoader });
+    const firstElement = mountElement(
+      `<div style="width:${FRAME_WIDTH}px;height:${FRAME_HEIGHT}px;font-family:'${TEST_FONT_FAMILY}',sans-serif;font-size:16px"><span>first</span><span>second</span></div>`
+    );
+
+    const firstResult = await figma.convert({
+      element: firstElement,
+      width: FRAME_WIDTH,
+      height: FRAME_HEIGHT,
+    });
+    expect(firstResult.diagnostics).toEqual([pageFontDiagnostic]);
+
+    // The face comes from the converter cache, but its degradation still
+    // belongs in the fresh report for this conversion.
+    const secondElement = mountElement(
+      `<div style="width:${FRAME_WIDTH}px;height:${FRAME_HEIGHT}px;font-family:'${TEST_FONT_FAMILY}',sans-serif;font-size:16px">third</div>`
+    );
+    const secondResult = await figma.convert({
+      element: secondElement,
+      width: FRAME_WIDTH,
+      height: FRAME_HEIGHT,
+    });
+    expect(secondResult.diagnostics).toEqual([pageFontDiagnostic]);
+  });
+
+  it("uses distinct real Inter outlines for arrow and checkmark fallback glyphs", async () => {
+    const element = mountElement(
+      `<div style="width:${FRAME_WIDTH}px;height:${FRAME_HEIGHT}px;font-family:'${TEST_FONT_FAMILY}',sans-serif;font-size:24px">A→✓</div>`
+    );
+
+    const figma = createFigmaConverter({
+      fontLoader: createFullInterFallbackLoader(),
+    });
+    const result = await figma.convert({
+      element,
+      width: FRAME_WIDTH,
+      height: FRAME_HEIGHT,
+    });
+
+    const textChange = result.document.nodeChanges.find(
+      (change) => change.type === "TEXT"
+    );
+    if (textChange?.type !== "TEXT") {
+      throw new Error("expected TEXT node");
+    }
+
+    const glyphs = textChange.derivedTextData?.glyphs ?? [];
+    expect(glyphs).toHaveLength(3);
+    const [letter, arrow, check] = glyphs;
+    expect(letter?.commandsBlob).not.toBe(arrow?.commandsBlob);
+    expect(letter?.commandsBlob).not.toBe(check?.commandsBlob);
+    expect(arrow?.commandsBlob).not.toBe(check?.commandsBlob);
+
+    for (const glyph of glyphs) {
+      const blob = result.document.blobs[glyph.commandsBlob];
+      expect(blob?.bytes.length).toBeGreaterThan(1);
+    }
+
+    expect(
+      result.diagnostics.filter(
+        (diagnostic) =>
+          diagnostic.code === "missing-glyph" &&
+          (diagnostic.character === "→" || diagnostic.character === "✓")
+      )
+    ).toEqual([]);
+  });
+
+  it("reports a truly missing glyph once and uses an empty blob instead of A", async () => {
+    // U+0378 is unassigned and maps to glyph id 0 in both bundled Open Sans
+    // and pinned full Inter. (Inter's private-use area contains real icons.)
+    const missingCharacter = "\u0378";
+    const element = mountElement(
+      `<div style="width:${FRAME_WIDTH}px;height:${FRAME_HEIGHT}px;font-family:'${TEST_FONT_FAMILY}',sans-serif;font-size:24px">A${missingCharacter}</div>`
+    );
+
+    const figma = createFigmaConverter({
+      fontLoader: createFullInterFallbackLoader(),
+    });
+    const result = await figma.convert({
+      element,
+      width: FRAME_WIDTH,
+      height: FRAME_HEIGHT,
+    });
+
+    const textChange = result.document.nodeChanges.find(
+      (change) => change.type === "TEXT"
+    );
+    if (textChange?.type !== "TEXT") {
+      throw new Error("expected TEXT node");
+    }
+
+    const glyphs = textChange.derivedTextData?.glyphs ?? [];
+    expect(glyphs).toHaveLength(2);
+    const [letter, missing] = glyphs;
+    expect(missing?.commandsBlob).not.toBe(letter?.commandsBlob);
+    expect(
+      result.document.blobs[letter?.commandsBlob ?? -1]?.bytes.length
+    ).toBeGreaterThan(1);
+    expect(result.document.blobs[missing?.commandsBlob ?? -1]?.bytes).toEqual([
+      0,
+    ]);
+
+    expect(
+      result.diagnostics.filter(
+        (diagnostic) => diagnostic.code === "missing-glyph"
+      )
+    ).toEqual([
+      expect.objectContaining({
+        code: "missing-glyph",
+        severity: "warning",
+        character: missingCharacter,
+      }),
+    ]);
   });
 });

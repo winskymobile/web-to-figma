@@ -1,4 +1,8 @@
-import type { FontLoader, FontProperties } from "@figit/dom-to-figma";
+import type {
+  ConverterDiagnostic,
+  FontLoader,
+  FontProperties,
+} from "@figit/dom-to-figma";
 
 /**
  * Prefer fonts declared via @font-face on the preview document (or page).
@@ -35,6 +39,8 @@ type PageFontEntry = {
   url: string;
 };
 
+const FONT_FACE_RULE_TYPE = 5;
+
 export type CreatePageFontLoaderOptions = {
   fallbackLoader: FontLoader;
   /** Document to scan for @font-face (defaults to window.document). */
@@ -49,6 +55,13 @@ export function createPageFontLoader({
   let scannedDoc: Document | null = null;
 
   return async (request: FontProperties) => {
+    // Symbol resolution is deliberately independent of page faces. A page may
+    // declare a latin-only Inter subset under the same family name, so both the
+    // page lookup and the primary-font cache lane must be bypassed here.
+    if (request.purpose === "symbol-fallback") {
+      return fallbackLoader(request);
+    }
+
     const doc = getDocument?.() ?? document;
     if (entries === null || scannedDoc !== doc) {
       entries = collectPageFontFaces(doc);
@@ -68,7 +81,16 @@ export function createPageFontLoader({
         resolvedItalic: match.italic,
       };
     } catch {
-      return fallbackLoader(request);
+      const fallback = await fallbackLoader(request);
+      const diagnostic: ConverterDiagnostic = {
+        code: "page-font-fetch-failed",
+        severity: "warning",
+        message: `Failed to fetch the matched page font "${match.family}"; used the configured fallback.`,
+      };
+      return {
+        ...fallback,
+        diagnostics: [...(fallback.diagnostics ?? []), diagnostic],
+      };
     }
   };
 }
@@ -82,19 +104,23 @@ export function invalidatePageFontCache(
 
 function collectPageFontFaces(doc: Document): Array<PageFontEntry> {
   const collected: Array<PageFontEntry> = [];
+  const baseHref = doc.baseURI || doc.location?.href || "";
   for (const sheet of Array.from(doc.styleSheets)) {
     let rules: CSSRuleList | null = null;
     try {
       rules = sheet.cssRules;
     } catch {
+      // Cross-origin sheets are opaque; skip.
       continue;
     }
     if (!rules) {
       continue;
     }
+    const sheetHref =
+      typeof sheet.href === "string" && sheet.href ? sheet.href : baseHref;
     for (const rule of Array.from(rules)) {
-      if (rule instanceof CSSFontFaceRule) {
-        const entry = parseFontFaceRule(rule);
+      if (isFontFaceRule(rule)) {
+        const entry = parseFontFaceRule(rule, sheetHref);
         if (entry) {
           collected.push(entry);
         }
@@ -104,7 +130,30 @@ function collectPageFontFaces(doc: Document): Array<PageFontEntry> {
   return collected;
 }
 
-function parseFontFaceRule(rule: CSSFontFaceRule): PageFontEntry | null {
+function isFontFaceRule(rule: CSSRule): rule is CSSFontFaceRule {
+  return rule.type === FONT_FACE_RULE_TYPE && "style" in rule;
+}
+
+function resolveFontUrl(url: string, baseHref: string): string {
+  if (
+    !url ||
+    url.startsWith("data:") ||
+    url.startsWith("blob:") ||
+    /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(url)
+  ) {
+    return url;
+  }
+  try {
+    return new URL(url, baseHref || undefined).href;
+  } catch {
+    return url;
+  }
+}
+
+function parseFontFaceRule(
+  rule: CSSFontFaceRule,
+  baseHref: string
+): PageFontEntry | null {
   const style = rule.style;
   const family = unquote(style.getPropertyValue("font-family"));
   const src = style.getPropertyValue("src");
@@ -112,10 +161,11 @@ function parseFontFaceRule(rule: CSSFontFaceRule): PageFontEntry | null {
     return null;
   }
 
-  const url = pickParseableUrl(src);
-  if (!url) {
+  const rawUrl = pickParseableUrl(src);
+  if (!rawUrl) {
     return null;
   }
+  const url = resolveFontUrl(rawUrl, baseHref);
 
   const fontStyle = style.getPropertyValue("font-style") || "normal";
   const fontWeight = style.getPropertyValue("font-weight") || "400";

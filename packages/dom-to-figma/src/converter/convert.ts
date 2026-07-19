@@ -1,4 +1,5 @@
 import type { ElementKind } from "./classify";
+import type { DiagnosticReporter } from "./diagnostics";
 import type { Position } from "./dom";
 import type { FontCache } from "./font-cache";
 import type { ImageCache } from "./image-cache";
@@ -40,6 +41,7 @@ export type ConvertContext = {
   fontCache: FontCache;
   imageCache: ImageCache;
   createGuid: () => FigmaGuid;
+  reportDiagnostic: DiagnosticReporter;
 };
 
 export type ConversionResult = {
@@ -90,6 +92,7 @@ export async function convertElement(
     fontCache,
     imageCache,
     createGuid,
+    reportDiagnostic,
   } = ctx;
 
   switch (kind) {
@@ -119,6 +122,7 @@ export async function convertElement(
         parentIsAutoLayout,
         childStackSpec,
         rootFill,
+        reportDiagnostic,
       });
       return {
         changes: [frameResult.nodeChange],
@@ -186,6 +190,7 @@ export async function convertElement(
               registerBlob,
               inheritedProperties,
               fontCache,
+              reportDiagnostic,
             }),
           ],
           childStackSpec
@@ -207,6 +212,7 @@ export async function convertElement(
             inheritedProperties,
             fontCache,
             createGuid,
+            reportDiagnostic,
           }),
           childStackSpec
         ),

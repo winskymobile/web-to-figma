@@ -2,6 +2,7 @@ import type { ElementKind } from "./classify";
 import { defaultClassify } from "./classify";
 import type { ConversionResult, InheritedProperties } from "./convert";
 import { convertElement } from "./convert";
+import type { DiagnosticReporter } from "./diagnostics";
 import type { TextLineSegment } from "./dom";
 import {
   getElementPositionRelativeToParent,
@@ -36,6 +37,7 @@ export type WalkContext = {
   registerBlob: (blob: FigmaBlob) => number;
   fontCache: FontCache;
   imageCache: ImageCache;
+  reportDiagnostic: DiagnosticReporter;
   appendChanges: (changes: ReadonlyArray<FigmaNodeChange>) => void;
 };
 
@@ -141,6 +143,7 @@ async function walkNode(
       fontCache: ctx.fontCache,
       imageCache: ctx.imageCache,
       createGuid: ctx.createGuid,
+      reportDiagnostic: ctx.reportDiagnostic,
     });
 
     ctx.appendChanges(result.changes);
@@ -160,8 +163,12 @@ async function walkNode(
     }
 
     return 1;
-  } catch (error) {
-    console.warn("Failed to process node:", error);
+  } catch {
+    ctx.reportDiagnostic({
+      code: "node-conversion-failed",
+      severity: "error",
+      message: `Failed to convert ${safeNodeLabel(node)} node.`,
+    });
     return 0;
   }
 }
@@ -242,6 +249,7 @@ async function renderTextNode(
     registerBlob: ctx.registerBlob,
     inheritedProperties,
     fontCache: ctx.fontCache,
+    reportDiagnostic: ctx.reportDiagnostic,
   });
 
   ctx.appendChanges([change]);
@@ -268,11 +276,19 @@ async function emitTextSegments(
       registerBlob: ctx.registerBlob,
       inheritedProperties,
       fontCache: ctx.fontCache,
+      reportDiagnostic: ctx.reportDiagnostic,
     });
     ctx.appendChanges([change]);
     emitted += 1;
   }
   return emitted;
+}
+
+function safeNodeLabel(node: Node): string {
+  if (isElementNode(node)) {
+    return node.tagName;
+  }
+  return node.nodeName || "unknown";
 }
 
 function nextInheritedProperties(

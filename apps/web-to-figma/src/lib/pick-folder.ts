@@ -18,12 +18,13 @@ type FsDirHandle = {
 };
 
 declare global {
-  type Window = {
+  // biome-ignore lint/style/useConsistentTypeDefinitions: Window must use interface merging to augment the DOM global.
+  interface Window {
     showDirectoryPicker?: (options?: {
       id?: string;
       mode?: "read" | "readwrite";
     }) => Promise<FsDirHandle>;
-  };
+  }
 }
 
 async function collectFromHandle(

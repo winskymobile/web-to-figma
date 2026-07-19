@@ -1,5 +1,6 @@
 type ResourcePromptProps = {
   open: boolean;
+  disabled: boolean;
   refs: Array<string>;
   onConfirm: () => void;
   onSkip: () => void;
@@ -7,6 +8,7 @@ type ResourcePromptProps = {
 
 export function ResourcePrompt({
   open,
+  disabled,
   refs,
   onConfirm,
   onSkip,
@@ -62,7 +64,8 @@ export function ResourcePrompt({
             稍后
           </button>
           <button
-            className="h-9 rounded-[var(--radius)] bg-[var(--primary)] px-3.5 font-medium text-[12.5px] text-[var(--primary-ink)] shadow-[var(--shadow-btn)] transition-colors hover:bg-[var(--primary-hover)]"
+            className="h-9 rounded-[var(--radius)] bg-[var(--primary)] px-3.5 font-medium text-[12.5px] text-[var(--primary-ink)] shadow-[var(--shadow-btn)] transition-colors hover:enabled:bg-[var(--primary-hover)] disabled:cursor-not-allowed disabled:bg-[#bdbdbd] disabled:shadow-none"
+            disabled={disabled}
             onClick={onConfirm}
             type="button"
           >

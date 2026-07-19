@@ -1,3 +1,4 @@
+import type { DiagnosticReporter } from "../../diagnostics";
 import type { Position, Size } from "../../dom";
 import { getElementSize, getTextSize, isTextNode } from "../../dom";
 import type { FontCache } from "../../font-cache";
@@ -108,6 +109,7 @@ type Params = {
     textGradient?: Array<FigmaPaint>;
   };
   fontCache: FontCache;
+  reportDiagnostic: DiagnosticReporter;
 };
 
 export async function nodeToTextNodeChange(
@@ -124,6 +126,7 @@ export async function nodeToTextNodeChange(
     inheritedProperties,
     textContent,
     fontCache,
+    reportDiagnostic,
   } = options;
   const isTextNodeValue = isTextNode(node);
 
@@ -148,8 +151,6 @@ export async function nodeToTextNodeChange(
   const baseHeight = nodeSize.height;
 
   const fontSize = Number.parseFloat(computedStyle.fontSize || "16");
-  const fontFamily =
-    computedStyle.fontFamily.replace(/["']/g, "").split(",")[0]?.trim() ?? "";
   const fontWeight = Number.parseInt(computedStyle.fontWeight, 10);
   const textAlign =
     cssToFigmaTextAlignHorizontalMap[computedStyle.textAlign] ?? "LEFT";
@@ -240,6 +241,9 @@ export async function nodeToTextNodeChange(
   const { font, ...styles } = parseTextProperties(element);
 
   const loadedFont = await fontCache.get(font);
+  for (const diagnostic of loadedFont.diagnostics) {
+    reportDiagnostic(diagnostic);
+  }
 
   // Wrap and align within the box this node ships with, NOT the parent
   // element's width: glyph/baseline offsets bake the alignment in, and the
@@ -278,12 +282,14 @@ export async function nodeToTextNodeChange(
   // (e.g. "→" showing as "和" until the text is re-edited in Figma).
   let symbolFallback: typeof loadedFont | null = null;
   try {
-    if (loadedFont.properties.family !== "Inter") {
-      symbolFallback = await fontCache.get({
-        family: "Inter",
-        weight: loadedFont.actualWeight ?? loadedFont.properties.weight ?? 400,
-        italic: false,
-      });
+    symbolFallback = await fontCache.get({
+      family: "Inter",
+      weight: loadedFont.actualWeight ?? loadedFont.properties.weight ?? 400,
+      italic: font.italic,
+      purpose: "symbol-fallback",
+    });
+    for (const diagnostic of symbolFallback.diagnostics) {
+      reportDiagnostic(diagnostic);
     }
   } catch {
     symbolFallback = null;
@@ -299,6 +305,19 @@ export async function nodeToTextNodeChange(
     registerBlob,
     symbolFallback ? [symbolFallback] : []
   );
+  for (const character of glyphs.missingCharacters) {
+    const codePoint = character.codePointAt(0);
+    reportDiagnostic({
+      code: "missing-glyph",
+      severity: "warning",
+      message: `No loaded font contains a glyph for ${codePoint === undefined ? "an unknown character" : `U+${codePoint.toString(16).toUpperCase().padStart(4, "0")}`}.`,
+      character,
+    });
+  }
+  const emptyGlyphBlob =
+    glyphs.missingCharacters.length > 0
+      ? registerBlob({ bytes: [0] })
+      : undefined;
 
   const baselines = buildBaselines(
     layout,
@@ -418,10 +437,10 @@ export async function nodeToTextNodeChange(
         const glyphData = glyphs.glyphDataMap.get(pos.character);
         // Prefer real outline; if still missing, emit empty path blob once so we
         // do not reuse index 0 (another character's outline).
-        let commandsBlob = glyphData?.registeredBlobIndex;
-        if (commandsBlob === undefined) {
-          commandsBlob = registerBlob({ bytes: [0] });
-        }
+        const commandsBlob =
+          glyphData?.registeredBlobIndex ??
+          emptyGlyphBlob ??
+          registerBlob({ bytes: [0] });
         const glyphPosition = {
           commandsBlob,
           position: {
@@ -439,7 +458,7 @@ export async function nodeToTextNodeChange(
       fontMetaData: [
         {
           key: {
-            family: loadedFont.properties.family,
+            family: loadedFont.actualFamily,
             style: loadedFont.fontStyleName,
             // Figma writes its FontMetaData entries with an empty postscript
             // even when the top-level fontName carries one. Match that so a
@@ -506,7 +525,8 @@ export async function nodeToTextNodeChange(
       units: "PIXELS",
     },
     fontName: {
-      family: fontFamily,
+      // Embedded/resolved face — never CSS keywords like `-apple-system`.
+      family: loadedFont.actualFamily,
       style: loadedFont.fontStyleName,
       postscript: loadedFont.postScriptName,
     },

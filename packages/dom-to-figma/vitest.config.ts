@@ -1,6 +1,9 @@
 import { playwright } from "@vitest/browser-playwright";
 import { defineConfig } from "vitest/config";
 
+const chromiumExecutablePath =
+  process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH?.trim();
+
 export default defineConfig({
   test: {
     projects: [
@@ -18,7 +21,15 @@ export default defineConfig({
           include: ["src/**/*.browser.test.ts"],
           browser: {
             enabled: true,
-            provider: playwright(),
+            provider: playwright(
+              chromiumExecutablePath
+                ? {
+                    launchOptions: {
+                      executablePath: chromiumExecutablePath,
+                    },
+                  }
+                : undefined
+            ),
             headless: true,
             instances: [{ browser: "chromium" }],
           },

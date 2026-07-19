@@ -1,7 +1,7 @@
 export type DeviceKind = "mobile" | "pc";
 
-export const MOBILE_WIDTHS = [360, 375, 390, 414] as const;
-export const PC_WIDTHS = [1280, 1440, 1512, 1920] as const;
+export const MOBILE_WIDTHS = [360, 375, 390, 430] as const;
+export const PC_WIDTHS = [1280, 1366, 1440, 1920] as const;
 
 export type MobileWidth = (typeof MOBILE_WIDTHS)[number];
 export type PcWidth = (typeof PC_WIDTHS)[number];

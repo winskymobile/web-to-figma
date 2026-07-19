@@ -1,10 +1,12 @@
 import type { FontFile, FontLoader, FontProperties } from "@figit/dom-to-figma";
 import { createFontsourceLoader } from "@figit/dom-to-figma";
+import { getFullInterFaceUrl, resolveSharedFontWeight } from "./inter-font";
 
 /**
  * Prefer Noto Sans SC for CJK text so glyphs/metrics match preparePreviewFonts.
  * When the converter explicitly requests a latin face (e.g. Inter for arrows /
- * checkmarks missing from the SC subset), load that face instead of Noto.
+ * checkmarks missing from the SC subset), load the version-pinned full Inter
+ * static face rather than a unicode-range Fontsource subset.
  */
 
 const CJK_FAMILY = "Noto Sans SC";
@@ -16,6 +18,26 @@ const LATIN_FAMILIES = new Set(
   )
 );
 
+function isSystemFontKeyword(familyKey: string): boolean {
+  return (
+    familyKey === "-apple-system" ||
+    familyKey === "system-ui" ||
+    familyKey === "blinkmacsystemfont" ||
+    familyKey === "segoe ui" ||
+    familyKey === "ui-sans-serif" ||
+    familyKey === "ui-serif" ||
+    familyKey === "ui-monospace" ||
+    familyKey === "sans-serif" ||
+    familyKey === "serif" ||
+    familyKey === "monospace" ||
+    familyKey.startsWith("pingfang") ||
+    familyKey.startsWith("hiragino") ||
+    familyKey.includes("yahei") ||
+    familyKey === "simhei" ||
+    familyKey === "simsun"
+  );
+}
+
 export function createCjkAwareFontLoader(): FontLoader {
   const cjkLoader = createFontsourceLoader({
     subset: CJK_SUBSET,
@@ -26,80 +48,75 @@ export function createCjkAwareFontLoader(): FontLoader {
     fallbackFamily: "Inter",
   });
 
-  const cache = new Map<string, Promise<FontFile>>();
-
-  return (request: FontProperties): Promise<FontFile> => {
-    const weight = snapWeight(request.weight);
+  return async (request: FontProperties): Promise<FontFile> => {
+    const weight = resolveSharedFontWeight(request.weight);
     const familyKey = request.family.trim().toLowerCase();
+    // System stacks never have embeddable files — always use CJK/Inter fallbacks.
     const wantLatin =
-      familyKey === "inter" ||
-      LATIN_FAMILIES.has(familyKey) ||
-      familyKey.includes("inter");
+      !isSystemFontKeyword(familyKey) &&
+      (familyKey === "inter" ||
+        LATIN_FAMILIES.has(familyKey) ||
+        familyKey.includes("inter"));
 
-    const cacheKey = `${wantLatin ? "latin" : "cjk"}:${familyKey}:${weight}:${request.italic ? 1 : 0}`;
-
-    let pending = cache.get(cacheKey);
-    if (!pending) {
-      pending = (async () => {
-        if (wantLatin) {
-          const file = await latinLoader({
-            family: familyKey.includes("inter") ? "Inter" : request.family,
-            weight,
-            italic: request.italic,
-          });
-          return {
-            ...file,
-            resolvedWeight: weight,
-            resolvedFamily:
-              request.family.trim().toLowerCase() === "inter"
-                ? undefined
-                : "Inter",
-          };
-        }
-
-        try {
-          const file = await cjkLoader({
-            family: CJK_FAMILY,
-            weight,
-            italic: false,
-          });
-          return {
-            bytes: file.bytes,
-            resolvedWeight: weight,
-            resolvedItalic: false,
-            resolvedFamily:
-              request.family.trim().toLowerCase() === CJK_FAMILY.toLowerCase()
-                ? undefined
-                : CJK_FAMILY,
-          };
-        } catch {
-          const file = await latinLoader({
-            family: "Inter",
-            weight,
-            italic: request.italic,
-          });
-          return {
-            ...file,
-            resolvedFamily: "Inter",
-          };
-        }
-      })();
-      cache.set(cacheKey, pending);
+    if (wantLatin) {
+      if (familyKey.includes("inter")) {
+        const file = await loadFullInter(weight, request.italic);
+        return {
+          ...file,
+          resolvedFamily: familyKey === "inter" ? undefined : "Inter",
+        };
+      }
+      const file = await latinLoader({
+        family: request.family,
+        weight,
+        italic: request.italic,
+      });
+      return {
+        ...file,
+        resolvedWeight: weight,
+        resolvedFamily:
+          request.family.trim().toLowerCase() === "inter" ? undefined : "Inter",
+      };
     }
-    return pending;
+
+    try {
+      const file = await cjkLoader({
+        family: CJK_FAMILY,
+        weight,
+        italic: false,
+      });
+      return {
+        bytes: file.bytes,
+        resolvedWeight: weight,
+        resolvedItalic: false,
+        resolvedFamily:
+          request.family.trim().toLowerCase() === CJK_FAMILY.toLowerCase()
+            ? undefined
+            : CJK_FAMILY,
+      };
+    } catch {
+      const file = await loadFullInter(weight, request.italic);
+      return {
+        ...file,
+        resolvedFamily: "Inter",
+      };
+    }
   };
 }
 
-function snapWeight(weight: number): number {
-  const steps = [100, 200, 300, 400, 500, 600, 700, 800, 900];
-  let best = 400;
-  let bestDist = Number.POSITIVE_INFINITY;
-  for (const s of steps) {
-    const d = Math.abs(s - weight);
-    if (d < bestDist) {
-      best = s;
-      bestDist = d;
-    }
+async function loadFullInter(
+  requestedWeight: number,
+  italic: boolean
+): Promise<FontFile> {
+  const resolvedWeight = resolveSharedFontWeight(requestedWeight);
+  const url = getFullInterFaceUrl(resolvedWeight, italic);
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Full Inter fetch failed (${response.status})`);
   }
-  return best;
+  return {
+    bytes: await response.arrayBuffer(),
+    resolvedWeight,
+    resolvedItalic: italic,
+  };
 }

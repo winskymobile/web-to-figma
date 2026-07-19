@@ -1,3 +1,4 @@
+import type { DiagnosticReporter } from "../../diagnostics";
 import type { Position } from "../../dom";
 import { getElementSize } from "../../dom";
 import type { FontCache } from "../../font-cache";
@@ -22,6 +23,7 @@ type FormElementParams = {
   };
   fontCache: FontCache;
   createGuid: () => FigmaGuid;
+  reportDiagnostic: DiagnosticReporter;
 };
 
 /**
@@ -172,6 +174,7 @@ export async function elementToFormNodeChange(
     inheritedProperties,
     fontCache,
     createGuid,
+    reportDiagnostic,
   } = params;
 
   const placeholderText = element.getAttribute("placeholder")?.trim();
@@ -212,6 +215,7 @@ export async function elementToFormNodeChange(
       registerBlob,
       inheritedProperties,
       fontCache,
+      reportDiagnostic,
     });
 
     nodeChanges.push(textNodeChange);

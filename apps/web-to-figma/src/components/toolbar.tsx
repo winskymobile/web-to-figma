@@ -84,6 +84,13 @@ export function Toolbar({
     }
   }, [htmlName, open]);
 
+  useEffect(() => {
+    if (copying) {
+      setOpen(false);
+      setSizeOpen(false);
+    }
+  }, [copying]);
+
   const summary = !htmlName
     ? "未导入"
     : building
@@ -111,15 +118,15 @@ export function Toolbar({
 
         <div className="relative min-w-0 flex-1" ref={wrapRef}>
           <button
-            aria-expanded={Boolean(htmlName) && open}
+            aria-expanded={Boolean(htmlName) && !copying && open}
             aria-haspopup={htmlName ? "dialog" : undefined}
             className={[
               "inline-flex h-[34px] max-w-full items-center gap-2 rounded-[var(--radius)] border border-[var(--line)] bg-white px-3 text-left text-[14px] shadow-[var(--shadow-chip)] transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-[var(--primary-ring)]",
-              htmlName
+              htmlName && !copying
                 ? "cursor-pointer hover:bg-[var(--bg-subtle)]"
                 : "cursor-default opacity-70",
             ].join(" ")}
-            disabled={!htmlName}
+            disabled={!htmlName || copying}
             onClick={() => {
               if (!htmlName) {
                 return;
@@ -160,7 +167,7 @@ export function Toolbar({
             {htmlName ? <Chevron open={open} /> : null}
           </button>
 
-          {htmlName && open ? (
+          {htmlName && open && !copying ? (
             <div className="absolute top-[calc(100%+6px)] left-0 z-20 w-[min(360px,calc(100vw-24px))] rounded-xl border border-[var(--line)] bg-white p-3 shadow-[0_12px_40px_rgb(0_0_0/0.12)]">
               <Section title="文档">
                 <Row label="HTML" value={htmlName ?? "—"} />
@@ -206,6 +213,7 @@ export function Toolbar({
 
               <div className="mt-3 flex flex-wrap gap-2 border-[var(--line)] border-t pt-3">
                 <MiniBtn
+                  disabled={copying}
                   onClick={() => {
                     setOpen(false);
                     onChangeHtml();
@@ -214,6 +222,7 @@ export function Toolbar({
                   更换 HTML
                 </MiniBtn>
                 <MiniBtn
+                  disabled={copying}
                   onClick={() => {
                     setOpen(false);
                     onAddAssets();
@@ -229,6 +238,7 @@ export function Toolbar({
 
       <div className="flex justify-center">
         <ViewportPicker
+          disabled={copying}
           onDeviceKindChange={onDeviceKindChange}
           onOpenChange={setSizeOpen}
           onViewportWidthChange={onViewportWidthChange}
@@ -241,7 +251,7 @@ export function Toolbar({
       <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
         <button
           className="inline-flex h-[34px] items-center justify-center rounded-[var(--radius)] border border-transparent bg-transparent px-3 font-medium text-[14px] text-[var(--muted)] transition-colors hover:enabled:bg-[var(--bg-hover)] hover:enabled:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-40"
-          disabled={!canClear}
+          disabled={!canClear || copying}
           onClick={onClear}
           type="button"
         >
@@ -284,14 +294,17 @@ function Row({ label, value }: { label: string; value: string }) {
 
 function MiniBtn({
   children,
+  disabled,
   onClick,
 }: {
   children: ReactNode;
+  disabled: boolean;
   onClick: () => void;
 }) {
   return (
     <button
-      className="h-8 rounded-md border border-[var(--line)] bg-white px-2.5 font-medium text-[14px] text-[var(--ink)] transition-colors hover:bg-[var(--bg-subtle)]"
+      className="h-8 rounded-md border border-[var(--line)] bg-white px-2.5 font-medium text-[14px] text-[var(--ink)] transition-colors hover:enabled:bg-[var(--bg-subtle)] disabled:cursor-not-allowed disabled:opacity-40"
+      disabled={disabled}
       onClick={onClick}
       type="button"
     >
@@ -301,6 +314,7 @@ function MiniBtn({
 }
 
 function ViewportPicker({
+  disabled,
   viewport,
   open,
   onOpenChange,
@@ -308,6 +322,7 @@ function ViewportPicker({
   onViewportWidthChange,
   sizeRef,
 }: {
+  disabled: boolean;
   viewport: ViewportPreset;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -323,6 +338,7 @@ function ViewportPicker({
       <fieldset
         aria-label="设备类型"
         className="m-0 inline-flex h-[34px] items-center rounded-[var(--radius)] border border-[var(--line)] bg-[var(--bg-subtle)] p-0.5"
+        disabled={disabled}
       >
         <DeviceKindButton
           active={viewport.kind === "mobile"}
@@ -343,7 +359,8 @@ function ViewportPicker({
           aria-expanded={open}
           aria-haspopup="listbox"
           aria-label={`画板宽度 ${viewport.width}`}
-          className="inline-flex h-[34px] items-center gap-1.5 rounded-[var(--radius)] border border-[var(--line)] bg-white px-2.5 font-medium text-[14px] text-[var(--ink)] shadow-[var(--shadow-chip)] transition-colors hover:bg-[var(--bg-subtle)] focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-[var(--primary-ring)]"
+          className="inline-flex h-[34px] items-center gap-1.5 rounded-[var(--radius)] border border-[var(--line)] bg-white px-2.5 font-medium text-[14px] text-[var(--ink)] shadow-[var(--shadow-chip)] transition-colors hover:enabled:bg-[var(--bg-subtle)] focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-[var(--primary-ring)] disabled:cursor-not-allowed disabled:opacity-40"
+          disabled={disabled}
           onClick={() => onOpenChange(!open)}
           type="button"
         >
@@ -352,7 +369,7 @@ function ViewportPicker({
           <Chevron open={open} />
         </button>
 
-        {open ? (
+        {open && !disabled ? (
           <div
             aria-label={`${kindLabel}宽度`}
             className="absolute top-[calc(100%+6px)] right-0 z-20 min-w-[148px] rounded-xl border border-[var(--line)] bg-white p-1.5 shadow-[0_12px_40px_rgb(0_0_0/0.12)]"

@@ -1,6 +1,10 @@
+import type { DiagnosticReporter } from "../../diagnostics";
 import type { Position } from "../../dom";
-import type { InferredChildStack } from "../../layout/infer";
-import { inferAutoLayout } from "../../layout/infer";
+import type {
+  InferredAutoLayout,
+  InferredChildStack,
+} from "../../layout/infer";
+import { tryInferAutoLayout } from "../../layout/infer";
 import { getNodeNameFromElement } from "../../naming";
 import {
   cssBackdropFilterToFigmaEffects,
@@ -115,6 +119,7 @@ type Params = {
   /** Set for the converted root element only: the size of the paste-template
    * frame (a VERTICAL stack) that this element is a fill child of. */
   rootFill?: { width: number; height: number };
+  reportDiagnostic?: DiagnosticReporter;
 };
 
 type FrameResult = {
@@ -142,12 +147,26 @@ export function elementToFrameNodeChange(
     parentIsAutoLayout,
     childStackSpec,
     rootFill,
+    reportDiagnostic,
   } = options;
 
   // Inferred auto-layout, spread onto the node change last so it overrides
   // `stackMode: "NONE"` and the CSS-padding fields (inference folds borders
-  // into padding). `null` means "keep absolute positioning" — always safe.
-  const inferred = layout === "auto" ? inferAutoLayout(element) : null;
+  // into padding). Bail keeps absolute positioning — always safe.
+  let inferred: InferredAutoLayout | null = null;
+  if (layout === "auto") {
+    const attempt = tryInferAutoLayout(element);
+    if (attempt.ok) {
+      inferred = attempt.value;
+    } else {
+      reportDiagnostic?.({
+        code: "layout-infer-bailed",
+        severity: "warning",
+        reason: attempt.reason,
+        message: `Auto Layout not applied (${attempt.reason}).`,
+      });
+    }
+  }
 
   const rect = element.getBoundingClientRect();
   const computedStyle = window.getComputedStyle(element);

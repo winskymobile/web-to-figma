@@ -4,6 +4,8 @@ import {
   toClipboardItem,
 } from "@figit/fig-kiwi";
 import { BlobManager } from "./converter/blob-manager";
+import type { ConverterDiagnostic } from "./converter/diagnostics";
+import { createDiagnosticReport } from "./converter/diagnostics";
 import { createFontCache } from "./converter/font-cache";
 import { createImageCache } from "./converter/image-cache";
 import type { ImageLoader } from "./converter/nodes/image/loader";
@@ -25,6 +27,7 @@ import { walkRoot } from "./converter/walk";
 
 export type { ElementKind } from "./converter/classify";
 export { defaultClassify } from "./converter/classify";
+export type { ConverterDiagnostic } from "./converter/diagnostics";
 export type {
   ImageFile,
   ImageLoader,
@@ -81,6 +84,8 @@ export type CanvasInput = {
 export type ConvertInput = SingleFrameInput | CanvasInput;
 
 export type ConvertResult = {
+  /** Non-fatal conversion degradations and caught node failures. */
+  readonly diagnostics: ReadonlyArray<ConverterDiagnostic>;
   /** Raw Figma node-change document. */
   document: FigmaClipboard;
   /** Encoded `.fig`-style binary. */
@@ -115,6 +120,7 @@ export function createFigmaConverter(
   const convert = async (input: ConvertInput): Promise<ConvertResult> => {
     const nodeChanges: Array<FigmaNodeChange> = [];
     const blobManager = new BlobManager();
+    const diagnosticReport = createDiagnosticReport();
     let idCounter = ROOT_RESERVED_GUIDS;
 
     const createGuid = (): FigmaGuid => {
@@ -130,6 +136,7 @@ export function createFigmaConverter(
       registerBlob: (blob) => blobManager.registerBlob(blob),
       fontCache,
       imageCache,
+      reportDiagnostic: diagnosticReport.report,
       appendChanges: (changes) => {
         for (const change of changes) {
           nodeChanges.push(change);
@@ -147,6 +154,7 @@ export function createFigmaConverter(
     const encoded = encodeFigmaData(document);
 
     return {
+      diagnostics: diagnosticReport.snapshot(),
       document,
       bytes: encoded.figBytes,
       base64: encoded.base64,

@@ -93,6 +93,46 @@ describe("createFigmaConverter convert()", () => {
     );
     expect(canvasChange?.name).toBe("Landing");
   });
+
+  it("reports caught node conversion failures without leaking them into the next conversion", async () => {
+    const secretDomText = "customer secret must stay private";
+    const failedElement = mountElement(
+      `<div id="explode" style="width:${FRAME_WIDTH}px;height:${FRAME_HEIGHT}px">${secretDomText}</div>`
+    );
+    const healthyElement = mountElement(
+      `<div id="healthy" style="width:${FRAME_WIDTH}px;height:${FRAME_HEIGHT}px"></div>`
+    );
+    const figma = createFigmaConverter({
+      classify: (element, defaultKind) => {
+        if (element.id === "explode") {
+          throw new Error(element.textContent ?? "");
+        }
+        return defaultKind;
+      },
+    });
+
+    const failedResult = await figma.convert({
+      element: failedElement,
+      width: FRAME_WIDTH,
+      height: FRAME_HEIGHT,
+    });
+
+    expect(failedResult.diagnostics).toEqual([
+      expect.objectContaining({
+        code: "node-conversion-failed",
+        severity: "error",
+      }),
+    ]);
+    expect(failedResult.diagnostics[0]?.message).toContain("DIV");
+    expect(failedResult.diagnostics[0]?.message).not.toContain(secretDomText);
+
+    const healthyResult = await figma.convert({
+      element: healthyElement,
+      width: FRAME_WIDTH,
+      height: FRAME_HEIGHT,
+    });
+    expect(healthyResult.diagnostics).toEqual([]);
+  });
 });
 
 describe("ConvertResult clipboard helpers", () => {

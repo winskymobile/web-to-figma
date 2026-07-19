@@ -1,34 +1,44 @@
-import { createFigmaConverter } from "@figit/dom-to-figma";
+import { createFigmaConverter, type FontLoader } from "@figit/dom-to-figma";
 
 import { createCjkAwareFontLoader } from "./cjk-font-loader";
+import { createPreviewConverterStore } from "./converter-store";
 import { createPageFontLoader } from "./page-font-loader";
 
-let previewDocument: Document | null = null;
+export function createPreviewFontLoader(
+  getDocument: () => Document | null | undefined
+): FontLoader {
+  const cjkFallback = createCjkAwareFontLoader();
+  return createPageFontLoader({
+    fallbackLoader: cjkFallback,
+    getDocument: () => getDocument() ?? document,
+  });
+}
+
+const converterStore = createPreviewConverterStore((getDocument) => {
+  const fontLoader = createPreviewFontLoader(getDocument);
+  // Match upstream default: infer Figma auto-layout when possible.
+  return createFigmaConverter({
+    layout: "auto",
+    fontLoader,
+  });
+});
 
 export function setPreviewDocument(doc: Document | null) {
-  previewDocument = doc;
+  converterStore.setDocument(doc);
 }
 
+/**
+ * Compatibility access for synchronous callers. New async conversions must use
+ * `withPreviewConverter` so document/cache state stays leased until completion.
+ */
 export function getConverter() {
-  // Rebuild each time is expensive; keep singleton but rebind page fonts
-  // via getDocument() so each convert scans the current preview iframe.
-  return getOrCreate();
+  return converterStore.getConverter();
 }
 
-let instance: ReturnType<typeof createFigmaConverter> | null = null;
-
-function getOrCreate() {
-  if (!instance) {
-    const cjkFallback = createCjkAwareFontLoader();
-    const fontLoader = createPageFontLoader({
-      fallbackLoader: cjkFallback,
-      getDocument: () => previewDocument ?? document,
-    });
-    // Match upstream default: infer Figma auto-layout when possible.
-    instance = createFigmaConverter({
-      layout: "auto",
-      fontLoader,
-    });
-  }
-  return instance;
+export function withPreviewConverter<Result>(
+  operation: (
+    converter: ReturnType<typeof createFigmaConverter>
+  ) => Result | Promise<Result>
+) {
+  return converterStore.withConverter(operation);
 }

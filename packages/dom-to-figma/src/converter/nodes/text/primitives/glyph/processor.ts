@@ -38,6 +38,8 @@ type GlyphData = {
 export type ProcessedGlyphs = {
   /** Map of character to glyph data with registered blob indices */
   glyphDataMap: Map<string, GlyphData>;
+  /** Unique characters absent from the primary and every fallback face. */
+  missingCharacters: ReadonlyArray<string>;
 };
 
 /**
@@ -102,6 +104,7 @@ export function processGlyphs(
   const uniqueChars = [...new Set(processedText)];
 
   const glyphDataMap = new Map<string, GlyphData>();
+  const missingCharacters: Array<string> = [];
   const fonts: Array<LoadedFont> = [loadedFont, ...fallbackFonts];
 
   // Process each unique character and register its blob
@@ -124,15 +127,16 @@ export function processGlyphs(
         break;
       }
     }
-    if (!glyphData) {
-      glyphData = processSyntheticGlyph(char, fontSize, registerBlob);
-    }
+    // Skip characters with no outline in primary or fallback fonts.
+    // Do not invent synthetic vector paths — prefer real font glyphs only.
     if (glyphData) {
       glyphDataMap.set(char, glyphData);
+    } else {
+      missingCharacters.push(char);
     }
   }
 
-  return { glyphDataMap };
+  return { glyphDataMap, missingCharacters };
 }
 
 /**
@@ -177,9 +181,6 @@ function processSingleGlyph(
   // valid glyph even when the cmap returns .notdef, since we substitute a
   // minimal blob for it anyway.
   if (glyph.id === 0 && char !== " ") {
-    console.warn(
-      `No glyph found for character: '${char}' (U+${codePoint.toString(16).toUpperCase()})`
-    );
     return null;
   }
 
@@ -199,7 +200,6 @@ function processSingleGlyph(
 
   if (glyphBytes.length <= 1) {
     // Path was empty (only the close opcode) — skip rather than emit a noop.
-    console.warn(`Empty path for character: '${char}'`);
     return null;
   }
 
@@ -275,145 +275,6 @@ function calculateAdvanceWidth(
  *
  * @internal
  */
-
-/**
- * Built-in outlines for punctuation/symbols often missing from CJK subset
- * fonts. Coordinates are in a 1000-unit em, Y-up (fontkit convention).
- * Keeps paste-time glyphs visible without requiring Figma re-derivation.
- */
-function processSyntheticGlyph(
-  char: string,
-  fontSize: number,
-  registerBlob: (blob: FigmaBlob) => number
-): GlyphData | null {
-  const unitsPerEm = 1000;
-  const commands = SYNTHETIC_PATHS[char];
-  if (!commands) {
-    return null;
-  }
-  const glyphBytes = pathCommandsToGlyphBytes(
-    commands as Parameters<typeof pathCommandsToGlyphBytes>[0],
-    { unitsPerEm }
-  );
-  if (glyphBytes.length <= 1) {
-    return null;
-  }
-  const codePoint = char.codePointAt(0);
-  if (codePoint === undefined) {
-    return null;
-  }
-  const advanceEm = SYNTHETIC_ADVANCE[char] ?? 600;
-  const advance = (advanceEm / unitsPerEm) * fontSize;
-  return {
-    character: char,
-    unicode: codePoint,
-    bytes: glyphBytes,
-    advance,
-    registeredBlobIndex: registerBlob({ bytes: glyphBytes }),
-  };
-}
-
-type SynthCmd = {
-  command:
-    | "moveTo"
-    | "lineTo"
-    | "quadraticCurveTo"
-    | "bezierCurveTo"
-    | "closePath";
-  args: Array<number>;
-};
-
-function arrowRight(): Array<SynthCmd> {
-  return [
-    { command: "moveTo", args: [80, 480] },
-    { command: "lineTo", args: [620, 480] },
-    { command: "lineTo", args: [420, 720] },
-    { command: "lineTo", args: [480, 780] },
-    { command: "lineTo", args: [780, 500] },
-    { command: "lineTo", args: [480, 220] },
-    { command: "lineTo", args: [420, 280] },
-    { command: "lineTo", args: [620, 520] },
-    { command: "lineTo", args: [80, 520] },
-    { command: "closePath", args: [] },
-  ];
-}
-
-function arrowLeft(): Array<SynthCmd> {
-  return [
-    { command: "moveTo", args: [920, 480] },
-    { command: "lineTo", args: [380, 480] },
-    { command: "lineTo", args: [580, 720] },
-    { command: "lineTo", args: [520, 780] },
-    { command: "lineTo", args: [220, 500] },
-    { command: "lineTo", args: [520, 220] },
-    { command: "lineTo", args: [580, 280] },
-    { command: "lineTo", args: [380, 520] },
-    { command: "lineTo", args: [920, 520] },
-    { command: "closePath", args: [] },
-  ];
-}
-
-function checkMark(): Array<SynthCmd> {
-  return [
-    { command: "moveTo", args: [120, 520] },
-    { command: "lineTo", args: [380, 260] },
-    { command: "lineTo", args: [880, 760] },
-    { command: "lineTo", args: [800, 840] },
-    { command: "lineTo", args: [380, 420] },
-    { command: "lineTo", args: [200, 600] },
-    { command: "closePath", args: [] },
-  ];
-}
-
-const SYNTHETIC_PATHS: Record<string, Array<SynthCmd>> = {
-  "\u2192": arrowRight(),
-  "\u2190": arrowLeft(),
-  "\u2713": checkMark(),
-  "\u2714": checkMark(),
-  "\u2022": [
-    { command: "moveTo", args: [500, 350] },
-    { command: "bezierCurveTo", args: [390, 350, 300, 440, 300, 550] },
-    { command: "bezierCurveTo", args: [300, 660, 390, 750, 500, 750] },
-    { command: "bezierCurveTo", args: [610, 750, 700, 660, 700, 550] },
-    { command: "bezierCurveTo", args: [700, 440, 610, 350, 500, 350] },
-    { command: "closePath", args: [] },
-  ],
-  "\u00b7": [
-    { command: "moveTo", args: [500, 420] },
-    { command: "bezierCurveTo", args: [430, 420, 370, 480, 370, 550] },
-    { command: "bezierCurveTo", args: [370, 620, 430, 680, 500, 680] },
-    { command: "bezierCurveTo", args: [570, 680, 630, 620, 630, 550] },
-    { command: "bezierCurveTo", args: [630, 480, 570, 420, 500, 420] },
-    { command: "closePath", args: [] },
-  ],
-  "\u2026": [
-    { command: "moveTo", args: [120, 420] },
-    { command: "lineTo", args: [220, 420] },
-    { command: "lineTo", args: [220, 520] },
-    { command: "lineTo", args: [120, 520] },
-    { command: "closePath", args: [] },
-    { command: "moveTo", args: [450, 420] },
-    { command: "lineTo", args: [550, 420] },
-    { command: "lineTo", args: [550, 520] },
-    { command: "lineTo", args: [450, 520] },
-    { command: "closePath", args: [] },
-    { command: "moveTo", args: [780, 420] },
-    { command: "lineTo", args: [880, 420] },
-    { command: "lineTo", args: [880, 520] },
-    { command: "lineTo", args: [780, 520] },
-    { command: "closePath", args: [] },
-  ],
-};
-
-const SYNTHETIC_ADVANCE: Record<string, number> = {
-  "\u2192": 860,
-  "\u2190": 860,
-  "\u2713": 900,
-  "\u2714": 920,
-  "\u2022": 500,
-  "\u00b7": 400,
-  "\u2026": 1000,
-};
 
 function applyCharacterSubstitutions(
   text: string,

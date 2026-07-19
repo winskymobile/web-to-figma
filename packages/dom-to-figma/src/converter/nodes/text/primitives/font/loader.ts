@@ -1,5 +1,6 @@
 import type { Font } from "fontkit";
 import { create } from "fontkit";
+import type { ConverterDiagnostic } from "../../../../diagnostics";
 import type { OpenTypeFont } from "../../types";
 import type { FontMetrics } from "./metrics";
 import { extractFontMetrics } from "./metrics";
@@ -13,6 +14,8 @@ export type FontProperties = {
   family: string;
   weight: number;
   italic: boolean;
+  /** Optional resolution intent; third-party loaders may ignore this hint. */
+  purpose?: "symbol-fallback";
 };
 
 /**
@@ -20,20 +23,18 @@ export type FontProperties = {
  * WOFF, or WOFF2 — fontkit detects the format). The optional `resolved*`
  * fields let the loader signal that a fallback was applied.
  *
- * `resolvedFamily` is set when the loader could not honour the requested
- * family and substituted bytes from a different family entirely (e.g. when
- * the requested family isn't in the loader's catalog). The conversion still
- * uses the *requested* family in the Figma payload — the substituted bytes
- * exist so dom-to-figma has metrics to lay out the text. Figma resolves
- * fonts at paste time via the user's system fonts, so a system-installed
- * family like Verdana renders correctly even if the loader had to feed
- * Inter bytes through the converter.
+ * `resolvedFamily` is set when the loader substituted a different family
+ * (e.g. page CSS asked for `-apple-system` but bytes are Noto Sans SC).
+ * The converter prefers that family for Figma `fontName` so labels match
+ * the embedded outlines instead of CSS system keywords.
  */
 export type FontFile = {
   bytes: ArrayBuffer;
   resolvedWeight?: number;
   resolvedItalic?: boolean;
   resolvedFamily?: string;
+  /** Degradations observed while resolving these bytes. */
+  diagnostics?: ReadonlyArray<ConverterDiagnostic>;
 };
 
 /**
@@ -50,8 +51,12 @@ export type LoadedFont = {
   /** What was actually loaded (after the loader's fallbacks). */
   actualWeight?: number;
   actualItalic: boolean;
+  /** Family name for Figma fontName (embedded / resolved face). */
+  actualFamily: string;
   fontStyleName: string;
   postScriptName: string;
+  /** Loader degradations retained across cache hits. */
+  diagnostics: ReadonlyArray<ConverterDiagnostic>;
 };
 
 const WEIGHT_TO_STYLE_NAME: Record<number, string> = {
@@ -86,18 +91,12 @@ export async function loadFont(
   const actualWeight = file.resolvedWeight ?? properties.weight;
   const actualItalic = file.resolvedItalic ?? properties.italic;
   const fontStyleName = buildFontStyleName(actualWeight, actualItalic);
-  // When the loader substituted a different family, the loaded bytes' name
-  // table belongs to the substitute (e.g. "Inter-Regular"). Synthesize the
-  // postScriptName from the *requested* family so the Figma payload asks for
-  // "Verdana-Regular", letting Figma render it from the destination's system
-  // fonts instead of the substitute.
-  const familyWasSubstituted =
-    file.resolvedFamily !== undefined &&
-    file.resolvedFamily !== properties.family;
-  const synthesizedPostScriptName = `${properties.family.replace(/\s+/g, "")}-${fontStyleName.replace(/\s+/g, "")}`;
-  const postScriptName = familyWasSubstituted
-    ? synthesizedPostScriptName
-    : (font.postscriptName ?? synthesizedPostScriptName);
+  // Prefer the family we actually embedded. CSS keywords like `-apple-system`
+  // must not leak into Figma's fontName.
+  const actualFamily =
+    file.resolvedFamily?.trim() || font.familyName?.trim() || properties.family;
+  const synthesizedPostScriptName = `${actualFamily.replace(/\s+/g, "")}-${fontStyleName.replace(/\s+/g, "")}`;
+  const postScriptName = font.postscriptName ?? synthesizedPostScriptName;
 
   return {
     font,
@@ -105,8 +104,12 @@ export async function loadFont(
     properties,
     actualWeight,
     actualItalic,
+    actualFamily,
     fontStyleName,
     postScriptName,
+    diagnostics: file.diagnostics
+      ? file.diagnostics.map((diagnostic) => ({ ...diagnostic }))
+      : [],
   };
 }
 
