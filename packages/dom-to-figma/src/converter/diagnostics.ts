@@ -3,7 +3,8 @@ export type ConverterDiagnostic = {
     | "page-font-fetch-failed"
     | "missing-glyph"
     | "node-conversion-failed"
-    | "layout-infer-bailed";
+    | "layout-infer-bailed"
+    | "pseudo-skipped";
   severity: "warning" | "error";
   message: string;
   character?: string;

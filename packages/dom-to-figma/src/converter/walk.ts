@@ -18,6 +18,7 @@ import {
 import type { FontCache } from "./font-cache";
 import type { ImageCache } from "./image-cache";
 import type { InferredChildStack } from "./layout/infer";
+import { convertDecorativePseudo } from "./nodes/pseudo/converter";
 import { nodeToTextNodeChange } from "./nodes/text";
 import type { FigmaBlob, FigmaGuid, FigmaNodeChange } from "./types";
 
@@ -148,8 +149,81 @@ async function walkNode(
 
     ctx.appendChanges(result.changes);
 
+    let childIndexCursor = 0;
+    const canHostPseudos =
+      result.hasChildren || kind === "frame" || kind === "group";
+
+    type BuiltPseudo = {
+      kind: "before" | "after";
+      zIndex: number;
+      nodeChange: FigmaNodeChange;
+    };
+    const builtPseudos: Array<BuiltPseudo> = [];
+
+    if (canHostPseudos) {
+      for (const pseudoKind of ["before", "after"] as const) {
+        const converted = convertDecorativePseudo(node, pseudoKind, {
+          createGuid: ctx.createGuid,
+          parentGuid: guid,
+          // Temporary index; rewritten after z-order placement.
+          childIndex: 0,
+        });
+        if (!converted.ok) {
+          if (
+            converted.reason === "masked" ||
+            converted.reason === "unresolved-geometry" ||
+            converted.reason === "generated-text"
+          ) {
+            ctx.reportDiagnostic({
+              code: "pseudo-skipped",
+              severity: "warning",
+              reason: converted.reason,
+              message: `Skipped ::${pseudoKind} on ${safeNodeLabel(node)} (${converted.reason}).`,
+            });
+          }
+          continue;
+        }
+        builtPseudos.push({
+          kind: pseudoKind,
+          zIndex: converted.zIndex,
+          nodeChange: converted.nodeChange,
+        });
+      }
+    }
+
+    // Negative z-index decorations paint under in-flow/content siblings; others
+    // after. Equal z-index keeps ::before under ::after (CSS tree order).
+    const kindRank = (k: "before" | "after") => (k === "before" ? 0 : 1);
+    const behind = builtPseudos
+      .filter((p) => p.zIndex < 0)
+      .sort(
+        (a, b) => a.zIndex - b.zIndex || kindRank(a.kind) - kindRank(b.kind)
+      );
+    const front = builtPseudos
+      .filter((p) => p.zIndex >= 0)
+      .sort(
+        (a, b) => a.zIndex - b.zIndex || kindRank(a.kind) - kindRank(b.kind)
+      );
+
+    const emitPseudo = (item: BuiltPseudo) => {
+      const parentIndex = item.nodeChange.parentIndex;
+      if (!parentIndex) {
+        return;
+      }
+      item.nodeChange.parentIndex = {
+        guid: parentIndex.guid,
+        position: childIndexCursor.toString(),
+      };
+      ctx.appendChanges([item.nodeChange]);
+      childIndexCursor += 1;
+    };
+
+    for (const item of behind) {
+      emitPseudo(item);
+    }
+
     if (result.hasChildren) {
-      await walkChildren(
+      childIndexCursor += await walkChildren(
         node,
         guid,
         nextInheritedProperties(node, inheritedProperties, result),
@@ -158,8 +232,13 @@ async function walkNode(
           isAutoLayout: result.isAutoLayout ?? false,
           childSpecs: result.childStackSpecs,
           reverse: result.reverseChildren,
-        }
+        },
+        childIndexCursor
       );
+    }
+
+    for (const item of front) {
+      emitPseudo(item);
     }
 
     return 1;
@@ -178,8 +257,9 @@ async function walkChildren(
   parentGuid: FigmaGuid,
   inheritedProperties: InheritedProperties,
   ctx: WalkContext,
-  parentStack: ParentStackInfo = NO_PARENT_STACK
-) {
+  parentStack: ParentStackInfo = NO_PARENT_STACK,
+  startChildIndex = 0
+): Promise<number> {
   // Auto-layout parents: Figma stacks lay out in *emission* order, so keep
   // DOM order (or reverse for flex-direction reverse). Sorting by stacking
   // order here reorders siblings in the layer tree and breaks hierarchy.
@@ -194,9 +274,10 @@ async function walkChildren(
     sortedNodes.reverse();
   }
 
-  let childNodeIndex = 0;
+  let childNodeIndex = startChildIndex;
+  let emitted = 0;
   for (const node of sortedNodes) {
-    childNodeIndex += await walkNode(
+    const n = await walkNode(
       node,
       parentGuid,
       childNodeIndex,
@@ -204,7 +285,10 @@ async function walkChildren(
       ctx,
       parentStack
     );
+    childNodeIndex += n;
+    emitted += n;
   }
+  return emitted;
 }
 
 async function renderTextNode(
