@@ -4,7 +4,8 @@ export type ConverterDiagnostic = {
     | "missing-glyph"
     | "node-conversion-failed"
     | "layout-infer-bailed"
-    | "pseudo-skipped";
+    | "pseudo-skipped"
+    | "decoration-rasterized";
   severity: "warning" | "error";
   message: string;
   character?: string;

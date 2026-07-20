@@ -309,6 +309,36 @@ describe("auto-layout inference for flex containers", () => {
       stackSpacing: 8,
     });
   });
+
+  it("uses measured padding when child margins offset CSS padding", async () => {
+    // Uniform cross-axis margin on every child: CSS pad alone fails verify by
+    // >0.6px, but measured min/max edges recover a valid stack.
+    const changes = await convertScene(
+      `<div style="width:280px;height:50px;display:flex;align-items:flex-start;gap:8px;padding:8px 10px;box-sizing:border-box;border:1px solid #ccc">
+        <div style="width:18px;height:18px;margin-top:2px;flex:0 0 auto;background:#0f0"></div>
+        <div style="height:18px;flex:1 1 auto;margin-top:2px;background:#00f"></div>
+      </div>`
+    );
+    const container = byLocalId(changes, CONTAINER_LOCAL_ID);
+    expect(container?.stackMode).toBe("HORIZONTAL");
+    expect(container?.stackSpacing).toBe(8);
+    // border(1) + padding-top(8) + margin-top(2)
+    expect(container?.stackVerticalPadding).toBe(11);
+  });
+
+  it("uses measured padding when only the first child has leading margin", async () => {
+    const changes = await convertScene(
+      `<div style="width:280px;height:40px;display:flex;align-items:flex-start;gap:8px;padding:8px 10px;box-sizing:border-box;border:1px solid #ccc">
+        <div style="width:18px;height:18px;margin-left:3px;flex:0 0 auto;background:#0f0"></div>
+        <div style="width:40px;height:18px;background:#00f"></div>
+      </div>`
+    );
+    const container = byLocalId(changes, CONTAINER_LOCAL_ID);
+    expect(container?.stackMode).toBe("HORIZONTAL");
+    expect(container?.stackSpacing).toBe(8);
+    // border(1) + padding-left(10) + margin-left(3)
+    expect(container?.stackHorizontalPadding).toBe(14);
+  });
 });
 
 describe("auto-layout fallbacks (stackMode stays NONE)", () => {

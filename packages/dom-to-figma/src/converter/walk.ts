@@ -19,6 +19,7 @@ import type { FontCache } from "./font-cache";
 import type { ImageCache } from "./image-cache";
 import type { InferredChildStack } from "./layout/infer";
 import { convertDecorativePseudo } from "./nodes/pseudo/converter";
+import { rasterizeMaskedPseudo } from "./nodes/pseudo/raster";
 import { nodeToTextNodeChange } from "./nodes/text";
 import type { FigmaBlob, FigmaGuid, FigmaNodeChange } from "./types";
 
@@ -68,6 +69,128 @@ type ParentStackInfo = {
 
 const NO_PARENT_STACK: ParentStackInfo = { isAutoLayout: false };
 
+type BuiltPseudo = {
+  kind: "before" | "after";
+  zIndex: number;
+  nodeChange: FigmaNodeChange;
+};
+
+/** Convert absolute decorative ::before/::after; rasterize masked paint when needed. */
+async function collectDecorativePseudos(
+  node: Element,
+  parentGuid: FigmaGuid,
+  ctx: WalkContext
+): Promise<Array<BuiltPseudo>> {
+  const built: Array<BuiltPseudo> = [];
+  for (const pseudoKind of ["before", "after"] as const) {
+    const converted = convertDecorativePseudo(node, pseudoKind, {
+      createGuid: ctx.createGuid,
+      parentGuid,
+      childIndex: 0,
+    });
+    if (converted.ok) {
+      built.push({
+        kind: pseudoKind,
+        zIndex: converted.zIndex,
+        nodeChange: converted.nodeChange,
+      });
+      continue;
+    }
+
+    if (
+      converted.reason === "masked" &&
+      converted.box &&
+      converted.zIndex !== undefined
+    ) {
+      const raster = await rasterizeMaskedPseudo({
+        host: node,
+        kind: pseudoKind,
+        box: converted.box,
+        guid: ctx.createGuid(),
+        parentGuid,
+        childIndex: 0,
+        registerBlob: ctx.registerBlob,
+        zIndex: converted.zIndex,
+      });
+      if (raster) {
+        built.push({
+          kind: pseudoKind,
+          zIndex: converted.zIndex,
+          nodeChange: raster,
+        });
+        ctx.reportDiagnostic({
+          code: "decoration-rasterized",
+          severity: "warning",
+          reason: "masked",
+          message: `Rasterized ::${pseudoKind} on ${safeNodeLabel(node)} (mask).`,
+        });
+        continue;
+      }
+    }
+
+    if (
+      converted.reason === "masked" ||
+      converted.reason === "unresolved-geometry" ||
+      converted.reason === "generated-text"
+    ) {
+      ctx.reportDiagnostic({
+        code: "pseudo-skipped",
+        severity: "warning",
+        reason: converted.reason,
+        message: `Skipped ::${pseudoKind} on ${safeNodeLabel(node)} (${converted.reason}).`,
+      });
+    }
+  }
+  return built;
+}
+
+function partitionPseudos(built: ReadonlyArray<BuiltPseudo>): {
+  behind: Array<BuiltPseudo>;
+  front: Array<BuiltPseudo>;
+} {
+  const kindRank = (k: "before" | "after") => (k === "before" ? 0 : 1);
+  const sortKey = (a: BuiltPseudo, b: BuiltPseudo) =>
+    a.zIndex - b.zIndex || kindRank(a.kind) - kindRank(b.kind);
+  return {
+    behind: built.filter((p) => p.zIndex < 0).sort(sortKey),
+    front: built.filter((p) => p.zIndex >= 0).sort(sortKey),
+  };
+}
+
+/** Inline text hosts that wrap mid-line emit split segments against the parent. */
+async function tryEmitInlineTextHost(
+  node: Element,
+  kind: string,
+  parentGuid: FigmaGuid,
+  childIndex: number,
+  inheritedProperties: InheritedProperties,
+  ctx: WalkContext
+): Promise<number | null> {
+  if (kind !== "text" || !node.parentElement) {
+    return null;
+  }
+  const only =
+    node.childNodes.length === 1 && node.firstChild ? node.firstChild : null;
+  if (!(only && isTextNode(only))) {
+    return null;
+  }
+  const segments = splitMidLineWrappedText(only, {
+    siblingContext: node,
+    relativeTo: node.parentElement,
+  });
+  if (!segments) {
+    return null;
+  }
+  return await emitTextSegments(
+    only,
+    segments,
+    parentGuid,
+    childIndex,
+    inheritedProperties,
+    ctx
+  );
+}
+
 /** Returns the number of node changes emitted for this DOM node (text nodes
  * can split into several). */
 async function walkNode(
@@ -100,31 +223,16 @@ async function walkNode(
       return 0;
     }
 
-    // An inline text element (span/a/…) whose inner text continues a line
-    // and wraps needs the same per-line split as a raw text node; segments
-    // are positioned against the element's parent, which is also their
-    // parent in the emitted tree.
-    if (kind === "text" && node.parentElement) {
-      const only =
-        node.childNodes.length === 1 && node.firstChild
-          ? node.firstChild
-          : null;
-      if (only && isTextNode(only)) {
-        const segments = splitMidLineWrappedText(only, {
-          siblingContext: node,
-          relativeTo: node.parentElement,
-        });
-        if (segments) {
-          return await emitTextSegments(
-            only,
-            segments,
-            parentGuid,
-            childIndex,
-            inheritedProperties,
-            ctx
-          );
-        }
-      }
+    const inlineCount = await tryEmitInlineTextHost(
+      node,
+      kind,
+      parentGuid,
+      childIndex,
+      inheritedProperties,
+      ctx
+    );
+    if (inlineCount !== null) {
+      return inlineCount;
     }
 
     const guid = ctx.createGuid();
@@ -152,58 +260,10 @@ async function walkNode(
     let childIndexCursor = 0;
     const canHostPseudos =
       result.hasChildren || kind === "frame" || kind === "group";
-
-    type BuiltPseudo = {
-      kind: "before" | "after";
-      zIndex: number;
-      nodeChange: FigmaNodeChange;
-    };
-    const builtPseudos: Array<BuiltPseudo> = [];
-
-    if (canHostPseudos) {
-      for (const pseudoKind of ["before", "after"] as const) {
-        const converted = convertDecorativePseudo(node, pseudoKind, {
-          createGuid: ctx.createGuid,
-          parentGuid: guid,
-          // Temporary index; rewritten after z-order placement.
-          childIndex: 0,
-        });
-        if (!converted.ok) {
-          if (
-            converted.reason === "masked" ||
-            converted.reason === "unresolved-geometry" ||
-            converted.reason === "generated-text"
-          ) {
-            ctx.reportDiagnostic({
-              code: "pseudo-skipped",
-              severity: "warning",
-              reason: converted.reason,
-              message: `Skipped ::${pseudoKind} on ${safeNodeLabel(node)} (${converted.reason}).`,
-            });
-          }
-          continue;
-        }
-        builtPseudos.push({
-          kind: pseudoKind,
-          zIndex: converted.zIndex,
-          nodeChange: converted.nodeChange,
-        });
-      }
-    }
-
-    // Negative z-index decorations paint under in-flow/content siblings; others
-    // after. Equal z-index keeps ::before under ::after (CSS tree order).
-    const kindRank = (k: "before" | "after") => (k === "before" ? 0 : 1);
-    const behind = builtPseudos
-      .filter((p) => p.zIndex < 0)
-      .sort(
-        (a, b) => a.zIndex - b.zIndex || kindRank(a.kind) - kindRank(b.kind)
-      );
-    const front = builtPseudos
-      .filter((p) => p.zIndex >= 0)
-      .sort(
-        (a, b) => a.zIndex - b.zIndex || kindRank(a.kind) - kindRank(b.kind)
-      );
+    const builtPseudos = canHostPseudos
+      ? await collectDecorativePseudos(node, guid, ctx)
+      : [];
+    const { behind, front } = partitionPseudos(builtPseudos);
 
     const emitPseudo = (item: BuiltPseudo) => {
       const parentIndex = item.nodeChange.parentIndex;

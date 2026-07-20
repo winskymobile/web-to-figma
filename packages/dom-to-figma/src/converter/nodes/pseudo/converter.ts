@@ -23,7 +23,14 @@ export type PseudoSkipReason =
 
 export type PseudoConvertResult =
   | { ok: true; nodeChange: FigmaFrameNodeChange; zIndex: number }
-  | { ok: false; reason: PseudoSkipReason };
+  | {
+      ok: false;
+      reason: PseudoSkipReason;
+      /** Present when geometry resolved (e.g. masked candidate for raster). */
+      box?: { x: number; y: number; width: number; height: number };
+      zIndex?: number;
+      style?: CSSStyleDeclaration;
+    };
 
 /** Parse CSS z-index; auto/invalid → 0 for paint-order classification. */
 export function parsePseudoZIndex(style: CSSStyleDeclaration): number {
@@ -64,7 +71,18 @@ function hasActiveMask(style: CSSStyleDeclaration): boolean {
 
 function contentIsDecorativeEmpty(content: string): boolean {
   const c = content.trim();
-  return c === '""' || c === "''" || c === "";
+  // CSSOM serializes empty content as "" or ''.
+  if (c === '""' || c === "''") {
+    return true;
+  }
+  // Quoted whitespace-only still counts as an empty decorative box.
+  if (
+    (c.startsWith('"') && c.endsWith('"')) ||
+    (c.startsWith("'") && c.endsWith("'"))
+  ) {
+    return c.slice(1, -1).trim().length === 0;
+  }
+  return false;
 }
 
 function contentIsNone(content: string): boolean {
@@ -231,10 +249,7 @@ export function convertDecorativePseudo(
   if (!contentIsDecorativeEmpty(content)) {
     return { ok: false, reason: "generated-text" };
   }
-  if (hasActiveMask(style)) {
-    return { ok: false, reason: "masked" };
-  }
-  if (!hasPaintableInk(style)) {
+  if (!(hasPaintableInk(style) || hasActiveMask(style))) {
     return { ok: false, reason: "no-ink" };
   }
 
@@ -246,6 +261,12 @@ export function convertDecorativePseudo(
   });
   if (!box) {
     return { ok: false, reason: "unresolved-geometry" };
+  }
+  if (hasActiveMask(style)) {
+    return { ok: false, reason: "masked", box, zIndex, style };
+  }
+  if (!hasPaintableInk(style)) {
+    return { ok: false, reason: "no-ink" };
   }
 
   const width = Math.max(box.width, 0.5);

@@ -303,6 +303,50 @@ type StackInference = {
   reverseChildren?: boolean;
 };
 
+/** Padding from child rects when CSS padding under-accounts for margins. */
+function measureFlexPaddingFromChildren(
+  childRects: ReadonlyArray<Rect>,
+  parentSize: { width: number; height: number },
+  _isRow: boolean
+): {
+  padLeft: number;
+  padTop: number;
+  padRight: number;
+  padBottom: number;
+} | null {
+  if (childRects.length === 0) {
+    return null;
+  }
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const rect of childRects) {
+    minX = Math.min(minX, rect.x);
+    minY = Math.min(minY, rect.y);
+    maxX = Math.max(maxX, rect.x + rect.width);
+    maxY = Math.max(maxY, rect.y + rect.height);
+  }
+  const padLeft = minX;
+  const padTop = minY;
+  const padRight = parentSize.width - maxX;
+  const padBottom = parentSize.height - maxY;
+  if (
+    padLeft < -GEOMETRY_TOLERANCE ||
+    padTop < -GEOMETRY_TOLERANCE ||
+    padRight < -GEOMETRY_TOLERANCE ||
+    padBottom < -GEOMETRY_TOLERANCE
+  ) {
+    return null;
+  }
+  return {
+    padLeft: round2(Math.max(padLeft, 0)),
+    padTop: round2(Math.max(padTop, 0)),
+    padRight: round2(Math.max(padRight, 0)),
+    padBottom: round2(Math.max(padBottom, 0)),
+  };
+}
+
 function inferFlexStack(
   input: StackInferenceInput
 ):
@@ -361,7 +405,20 @@ function inferFlexStack(
   };
 
   if (!verifyGeometry(spec, parentSize, childRects)) {
-    return { ok: false, reason: "verify-geometry-failed" };
+    const measured = measureFlexPaddingFromChildren(
+      childRects,
+      parentSize,
+      isRow
+    );
+    if (measured) {
+      spec.stackHorizontalPadding = measured.padLeft;
+      spec.stackVerticalPadding = measured.padTop;
+      spec.stackPaddingRight = measured.padRight;
+      spec.stackPaddingBottom = measured.padBottom;
+    }
+    if (!(measured && verifyGeometry(spec, parentSize, childRects))) {
+      return { ok: false, reason: "verify-geometry-failed" };
+    }
   }
 
   const elementFlow = flow.filter(isElementFlowItem);
