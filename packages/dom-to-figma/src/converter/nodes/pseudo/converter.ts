@@ -282,12 +282,7 @@ export function convertDecorativePseudo(
     );
   }
   if (backgroundImage && backgroundImage !== "none") {
-    fillPaints.push(
-      ...cssBackgroundToFigmaPaints(backgroundImage, {
-        width,
-        height,
-      })
-    );
+    fillPaints.push(...cssBackgroundToFigmaPaints(backgroundImage));
   }
 
   const borderProperties = parseBorderFromComputedStyle(style, {
