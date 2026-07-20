@@ -66,3 +66,59 @@ describe("cssBackgroundToFigmaPaints", () => {
     expect(paints.length).toBe(2);
   });
 });
+
+describe("length stops and covering line (A+B)", () => {
+  it("normalizes 330px stops using box height for vertical gradient", () => {
+    const paints = cssBackgroundToFigmaPaints(
+      "linear-gradient(180deg, #1296f4 0, #1296f4 330px, #f5fbff 330px, #f5fbff 100%)",
+      { width: 430, height: 1000 }
+    );
+    expect(paints).toHaveLength(1);
+    const paint = paints[0];
+    if (paint?.type !== "GRADIENT_LINEAR") {
+      throw new Error("expected linear");
+    }
+    expect(paint.stops).toHaveLength(4);
+    expect(paint.stops[0]?.position).toBeCloseTo(0, 5);
+    expect(paint.stops[1]?.position).toBeCloseTo(0.33, 5);
+    expect(paint.stops[2]?.position).toBeCloseTo(0.33, 5);
+    expect(paint.stops[3]?.position).toBeCloseTo(1, 5);
+  });
+
+  it("keeps percent mid stop at 58% with covering transform when size given", () => {
+    const paints = cssBackgroundToFigmaPaints(
+      "linear-gradient(135deg, #0d76e7, #10a8f6 58%, #19c79d)",
+      { width: 400, height: 200 }
+    );
+    const paint = paints[0];
+    if (paint?.type !== "GRADIENT_LINEAR") {
+      throw new Error("expected linear");
+    }
+    expect(paint.stops).toHaveLength(3);
+    expect(paint.stops[1]?.position).toBeCloseTo(0.58, 5);
+    expect(paint.transform).toBeDefined();
+    // Covering line for non-square box is not the pure centered unit rotation.
+    const centered = cssBackgroundToFigmaPaints(
+      "linear-gradient(135deg, #0d76e7, #10a8f6 58%, #19c79d)"
+    )[0];
+    if (centered?.type !== "GRADIENT_LINEAR") {
+      throw new Error("expected linear");
+    }
+    expect(paint.transform?.m00).not.toBeCloseTo(
+      centered.transform?.m00 ?? 999,
+      5
+    );
+  });
+
+  it("uses even spacing for length stops when box size is omitted", () => {
+    const paints = cssBackgroundToFigmaPaints(
+      "linear-gradient(180deg, #1296f4 0, #1296f4 330px, #f5fbff 330px, #f5fbff 100%)"
+    );
+    const paint = paints[0];
+    if (paint?.type !== "GRADIENT_LINEAR") {
+      throw new Error("expected linear");
+    }
+    // Without size, 330px falls back to even indices 0, 1/3, 2/3, 1
+    expect(paint.stops[1]?.position).toBeCloseTo(1 / 3, 5);
+  });
+});

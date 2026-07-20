@@ -6,6 +6,11 @@ type GradientStop = {
   position: number;
 };
 
+export type GradientBoxSize = {
+  width: number;
+  height: number;
+};
+
 /**
  * Split a CSS function argument list on top-level commas only
  * (ignores commas inside nested parentheses).
@@ -79,7 +84,6 @@ function isPositionToken(token: string): boolean {
   if (t.endsWith("px") || t.endsWith("em") || t.endsWith("rem")) {
     return !Number.isNaN(Number.parseFloat(t));
   }
-  // bare 0..1 or 0..100 number without color keywords
   if (/^-?[\d.]+$/.test(t)) {
     return true;
   }
@@ -87,24 +91,42 @@ function isPositionToken(token: string): boolean {
 }
 
 /**
- * Parse a gradient stop. Supports modern colors with internal spaces:
- * `oklch(0.7 0.1 30) 50%`, `rgba(255, 0, 0, 0.5) 0.25`.
+ * CSS gradient line length for a rectangular box (CSS Images Level 3).
+ * θ: 0deg = up, clockwise. In y-down: direction (sin θ, −cos θ).
+ * Length = |w·sin θ| + |h·cos θ|.
+ */
+export function cssGradientLineLength(
+  cssAngleDegrees: number,
+  box: GradientBoxSize
+): number {
+  const w = Math.max(box.width, 0);
+  const h = Math.max(box.height, 0);
+  const rad = (cssAngleDegrees * Math.PI) / 180;
+  const sin = Math.sin(rad);
+  const cos = Math.cos(rad);
+  const len = Math.abs(w * sin) + Math.abs(h * cos);
+  return Math.max(len, 1e-6);
+}
+
+/**
+ * Parse a gradient stop. Supports modern colors with internal spaces.
+ * Length positions require `lineLength` (from box + angle); otherwise fall back
+ * to even spacing by index.
  */
 function parseGradientStop(
   stopString: string,
   index: number,
-  totalStops: number
+  totalStops: number,
+  lineLength: number | null
 ): GradientStop | null {
   const trimmed = stopString.trim();
   if (!trimmed) {
     return null;
   }
 
-  // Walk from the end: last top-level token may be a position.
   let colorString = trimmed;
   let position: number | null = null;
 
-  // Find last space outside parentheses
   let depth = 0;
   let lastSpace = -1;
   for (let i = 0; i < trimmed.length; i += 1) {
@@ -129,11 +151,14 @@ function parseGradientStop(
         maybePos.endsWith("em") ||
         maybePos.endsWith("rem")
       ) {
-        // Length positions need the gradient line length; fall back to even spacing.
-        position = null;
+        const px = Number.parseFloat(maybePos);
+        if (lineLength !== null && lineLength > 0 && Number.isFinite(px)) {
+          position = px / lineLength;
+        } else {
+          position = null;
+        }
       } else {
         const n = Number.parseFloat(maybePos);
-        // CSS allows 0-1 or sometimes 0-100 without unit in computed styles rarely
         position = n > 1 ? n / 100 : n;
       }
     }
@@ -163,15 +188,12 @@ function parseGradientStop(
 
 /**
  * CSS linear-gradient angles: 0deg = up, clockwise positive.
- * Keywords `to <side-or-corner>` convert to the opposite of the destination
- * (gradient line points toward the keyword direction).
  */
 function parseLinearGradientAngle(angleString: string): number {
   const trimmedAngleString = angleString.trim().toLowerCase();
 
   if (trimmedAngleString.startsWith("to ")) {
     const direction = trimmedAngleString.slice(3).trim().replace(/\s+/g, " ");
-    // Normalize corner order variants: "right top" → "top right"
     const parts = new Set(direction.split(" "));
     const has = (s: string) => parts.has(s);
     if (has("top") && has("right")) {
@@ -218,17 +240,12 @@ function parseLinearGradientAngle(angleString: string): number {
 }
 
 /**
- * Map a CSS linear-gradient angle to Figma's gradient transform.
- *
- * Figma's default GRADIENT_LINEAR runs left → right in unit space (CSS 90deg).
- * CSS 0deg points up and increases clockwise.
- *
- * Matrix maps the unit gradient vector onto the node; translation keeps the
- * gradient centered on the layer.
+ * Centered unit-box rotation (legacy / no box size).
+ * Figma default LTR; CSS 90° → identity rotation of that base.
  */
-function calculateGradientTransform(cssAngleDegrees: number): FigmaTransform {
-  // Convert CSS angle to math angle for a left→right base:
-  // CSS 90° (right) → 0 rad rotation of the LTR base.
+function calculateCenteredGradientTransform(
+  cssAngleDegrees: number
+): FigmaTransform {
   const radians = ((cssAngleDegrees - 90) * Math.PI) / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);
@@ -243,12 +260,74 @@ function calculateGradientTransform(cssAngleDegrees: number): FigmaTransform {
   };
 }
 
+/**
+ * Covering-line transform: map unit (0,0)→(1,0) onto the CSS gradient line
+ * segment across the box, in normalized layer coordinates.
+ */
+export function calculateCoveringGradientTransform(
+  cssAngleDegrees: number,
+  box: GradientBoxSize
+): FigmaTransform {
+  const w = Math.max(box.width, 1e-6);
+  const h = Math.max(box.height, 1e-6);
+  const rad = (cssAngleDegrees * Math.PI) / 180;
+  // y-down unit direction for CSS angle
+  const dx = Math.sin(rad);
+  const dy = -Math.cos(rad);
+  const lineLen = Math.abs(w * dx) + Math.abs(h * dy);
+  const L = Math.max(lineLen, 1e-6);
+  const ux = dx;
+  const uy = dy;
+
+  const cx = w / 2;
+  const cy = h / 2;
+  const startX = cx - ux * (L / 2);
+  const startY = cy - uy * (L / 2);
+  const endX = cx + ux * (L / 2);
+  const endY = cy + uy * (L / 2);
+
+  const sx = startX / w;
+  const sy = startY / h;
+  const ex = endX / w;
+  const ey = endY / h;
+
+  const m00 = ex - sx;
+  const m10 = ey - sy;
+  // Orthogonal in normalized space (rotate 90° CCW of the main vector).
+  const m01 = -m10;
+  const m11 = m00;
+
+  return {
+    m00,
+    m01,
+    m02: sx,
+    m10,
+    m11,
+    m12: sy,
+  };
+}
+
+function calculateGradientTransform(
+  cssAngleDegrees: number,
+  box: GradientBoxSize | null
+): FigmaTransform {
+  if (
+    box &&
+    Number.isFinite(box.width) &&
+    Number.isFinite(box.height) &&
+    box.width > 0 &&
+    box.height > 0
+  ) {
+    return calculateCoveringGradientTransform(cssAngleDegrees, box);
+  }
+  return calculateCenteredGradientTransform(cssAngleDegrees);
+}
+
 function normalizeStops(stops: Array<GradientStop>): Array<GradientStop> {
   if (stops.length === 0) {
     return stops;
   }
 
-  // Ensure monotonic positions (CSS allows missing positions).
   const out = stops.map((s) => ({ ...s, color: { ...s.color } }));
   for (let i = 1; i < out.length; i += 1) {
     const prev = out[i - 1];
@@ -258,8 +337,6 @@ function normalizeStops(stops: Array<GradientStop>): Array<GradientStop> {
     }
   }
 
-  // Transparent black stops often come from `transparent` — borrow RGB from
-  // the nearest visible neighbor so Figma interpolates alpha only.
   const visible = out.filter((s) => s.color.a > 0);
   if (visible.length > 0) {
     const firstVisible = visible[0]?.color;
@@ -274,7 +351,6 @@ function normalizeStops(stops: Array<GradientStop>): Array<GradientStop> {
         stop.color.g === 0 &&
         stop.color.b === 0
       ) {
-        // Prefer previous visible, else next, else first visible.
         let ref = firstVisible;
         for (let j = i - 1; j >= 0; j -= 1) {
           const prev = out[j];
@@ -302,7 +378,10 @@ function normalizeStops(stops: Array<GradientStop>): Array<GradientStop> {
   return out;
 }
 
-function parseLinearGradient(cssGradient: string): FigmaPaint | null {
+function parseLinearGradient(
+  cssGradient: string,
+  box: GradientBoxSize | null
+): FigmaPaint | null {
   const content =
     extractFunctionArgs(cssGradient, "linear-gradient") ??
     extractFunctionArgs(cssGradient, "repeating-linear-gradient");
@@ -323,13 +402,23 @@ function parseLinearGradient(cssGradient: string): FigmaPaint | null {
     colorStops = parts.slice(1);
   }
 
+  const lineLength =
+    box && box.width > 0 && box.height > 0
+      ? cssGradientLineLength(angle, box)
+      : null;
+
   const stops: Array<GradientStop> = [];
   for (let i = 0; i < colorStops.length; i += 1) {
     const stopString = colorStops[i];
     if (!stopString) {
       continue;
     }
-    const stop = parseGradientStop(stopString, i, colorStops.length);
+    const stop = parseGradientStop(
+      stopString,
+      i,
+      colorStops.length,
+      lineLength
+    );
     if (stop) {
       stops.push(stop);
     }
@@ -347,7 +436,7 @@ function parseLinearGradient(cssGradient: string): FigmaPaint | null {
     opacity: 1,
     visible: true,
     blendMode: "NORMAL",
-    transform: calculateGradientTransform(angle),
+    transform: calculateGradientTransform(angle, box),
   };
 }
 
@@ -370,7 +459,6 @@ function parseRadialGradient(cssGradient: string): FigmaPaint | null {
 
   let colorStops = parts;
   const first = parts[0]?.trim().toLowerCase() ?? "";
-  // First arg may be shape/size/position, not a color stop.
   if (
     first.startsWith("circle") ||
     first.startsWith("ellipse") ||
@@ -388,7 +476,7 @@ function parseRadialGradient(cssGradient: string): FigmaPaint | null {
     if (!stopString) {
       continue;
     }
-    const stop = parseGradientStop(stopString, i, colorStops.length);
+    const stop = parseGradientStop(stopString, i, colorStops.length, null);
     if (stop) {
       stops.push(stop);
     }
@@ -397,7 +485,6 @@ function parseRadialGradient(cssGradient: string): FigmaPaint | null {
     return null;
   }
 
-  // Default Figma radial covers the unit box from center.
   const transform: FigmaTransform = {
     m00: 1,
     m01: 0,
@@ -417,26 +504,26 @@ function parseRadialGradient(cssGradient: string): FigmaPaint | null {
   };
 }
 
-/**
- * Split a background-image list into individual layers (top-level commas).
- */
 function splitBackgroundLayers(cssBackground: string): Array<string> {
   return splitTopLevel(cssBackground);
 }
 
 /**
  * Converts a CSS background / background-image value to Figma paints.
- * Handles one or more linear/radial gradients (first paint = topmost layer
- * when multiple are present — Figma paints draw first item on top when
- * listed last? Figma fillPaints: first is bottom. CSS backgrounds: first is
- * top. So reverse so visual order matches.)
+ * Optional `box` enables length stop normalization and covering-line transforms.
  */
 export function cssBackgroundToFigmaPaints(
-  cssBackground: string
+  cssBackground: string,
+  box?: GradientBoxSize | null
 ): Array<FigmaPaint> {
   if (!cssBackground || cssBackground === "none") {
     return [];
   }
+
+  const size =
+    box && box.width > 0 && box.height > 0
+      ? { width: box.width, height: box.height }
+      : null;
 
   const layers = splitBackgroundLayers(cssBackground);
   const paints: Array<FigmaPaint> = [];
@@ -444,7 +531,7 @@ export function cssBackgroundToFigmaPaints(
   for (const layer of layers) {
     const lower = layer.toLowerCase();
     if (lower.includes("linear-gradient")) {
-      const paint = parseLinearGradient(layer);
+      const paint = parseLinearGradient(layer, size);
       if (paint) {
         paints.push(paint);
       }
@@ -457,6 +544,5 @@ export function cssBackgroundToFigmaPaints(
   }
 
   // CSS: first layer is on top. Figma: last fill is on top.
-  // Reverse so the first CSS gradient is the topmost Figma fill.
   return paints.reverse();
 }

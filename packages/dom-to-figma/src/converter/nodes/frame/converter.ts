@@ -263,7 +263,11 @@ export function elementToFrameNodeChange(
 
   // Add background-image on top (top layer)
   if (backgroundImage && backgroundImage !== "none") {
-    const gradientPaints = cssBackgroundToFigmaPaints(backgroundImage);
+    const paintRect = element.getBoundingClientRect();
+    const gradientPaints = cssBackgroundToFigmaPaints(backgroundImage, {
+      width: paintRect.width,
+      height: paintRect.height,
+    });
 
     if (isTextClipped) {
       textGradient = gradientPaints;
