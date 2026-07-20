@@ -71,6 +71,61 @@ const WEIGHT_TO_STYLE_NAME: Record<number, string> = {
   900: "Black",
 };
 
+/** Nearest CSS weight key for Figma style name (e.g. 650 → Bold). */
+function snapWeightToStyleBucket(weight: number): number {
+  const keys = Object.keys(WEIGHT_TO_STYLE_NAME).map(Number);
+  let best = 400;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const key of keys) {
+    const distance = Math.abs(key - weight);
+    if (distance < bestDistance || (distance === bestDistance && key > best)) {
+      best = key;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+/**
+ * Strip trailing RIBBI / weight tokens from a family string so Figma shows
+ * e.g. family "Inter" + style "Bold", never family "Inter Bold".
+ */
+const FAMILY_STYLE_SUFFIX_RE =
+  /(?:\s+|-)(?:thin|extra\s*light|extralight|ultra\s*light|ultralight|light|regular|normal|book|medium|demi\s*bold|demibold|semi\s*bold|semibold|bold|extra\s*bold|extrabold|ultra\s*bold|ultrabold|black|heavy|italic|oblique|roman)(?:\s+italic|\s+oblique)?$/i;
+
+function stripStyleSuffixFromFamily(family: string): string {
+  let value = family.trim();
+  // Repeatedly peel style tokens (e.g. "Inter Bold Italic").
+  for (let i = 0; i < 4; i += 1) {
+    const next = value.replace(FAMILY_STYLE_SUFFIX_RE, "").trim();
+    if (next === value || !next) {
+      break;
+    }
+    value = next;
+  }
+  return value || family.trim();
+}
+
+/**
+ * Canonical Figma family labels for station export faces.
+ * Weight lives only in fontName.style (Bold/Medium/…), never in family.
+ */
+function canonicalizeExportFamily(family: string): string {
+  const key = stripStyleSuffixFromFamily(family).toLowerCase();
+  if (key === "inter" || key.startsWith("inter ")) {
+    return "Inter";
+  }
+  if (
+    key === "noto sans sc" ||
+    key === "noto sans cjk sc" ||
+    key === "noto sans simplified chinese" ||
+    key.startsWith("noto sans sc ")
+  ) {
+    return "Noto Sans SC";
+  }
+  return stripStyleSuffixFromFamily(family);
+}
+
 export async function loadFont(
   fontLoader: FontLoader,
   properties: FontProperties
@@ -91,12 +146,20 @@ export async function loadFont(
   const actualWeight = file.resolvedWeight ?? properties.weight;
   const actualItalic = file.resolvedItalic ?? properties.italic;
   const fontStyleName = buildFontStyleName(actualWeight, actualItalic);
-  // Prefer the family we actually embedded. CSS keywords like `-apple-system`
-  // must not leak into Figma's fontName.
-  const actualFamily =
-    file.resolvedFamily?.trim() || font.familyName?.trim() || properties.family;
+  // Figma font picker: family is bare ("Inter" / "Noto Sans SC"); weight is
+  // only in `style`. Prefer loader resolvedFamily / request family over OT
+  // name tables that often bake "Bold" into familyName ("Inter Bold").
+  const rawFamily =
+    file.resolvedFamily?.trim() ||
+    properties.family?.trim() ||
+    font.familyName?.trim() ||
+    "Inter";
+  const actualFamily = canonicalizeExportFamily(rawFamily);
+  // Prefer a clean family+style postscript for Figma matching; OT postscripts
+  // like "Inter-Bold" are fine, but never leave weight only in family.
   const synthesizedPostScriptName = `${actualFamily.replace(/\s+/g, "")}-${fontStyleName.replace(/\s+/g, "")}`;
-  const postScriptName = font.postscriptName ?? synthesizedPostScriptName;
+  const postScriptName =
+    font.postscriptName?.trim() || synthesizedPostScriptName;
 
   return {
     font,
@@ -127,7 +190,8 @@ function isFont(value: unknown): value is Font {
 }
 
 function buildFontStyleName(weight: number, italic: boolean): string {
-  const baseName = WEIGHT_TO_STYLE_NAME[weight] ?? "Regular";
+  const bucket = snapWeightToStyleBucket(weight);
+  const baseName = WEIGHT_TO_STYLE_NAME[bucket] ?? "Regular";
   if (!italic) {
     return baseName;
   }

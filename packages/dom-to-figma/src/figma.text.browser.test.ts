@@ -494,3 +494,164 @@ describe("rich-inline single layer (scheme C)", () => {
     expect(merged).toBeUndefined();
   });
 });
+
+describe("single-symbol Inter primary + Noto default", () => {
+  function createStationLikeFontLoader(): FontLoader {
+    const primaryLoader = createTestFontLoader();
+    const interLoader = createFullInterFallbackLoader();
+    return async (request): Promise<FontFile> => {
+      const family = request.family.trim().toLowerCase();
+      if (family === "inter") {
+        const file = await interLoader(request);
+        return {
+          ...file,
+          resolvedWeight: request.weight,
+          resolvedItalic: request.italic,
+          resolvedFamily: "Inter",
+        };
+      }
+      if (family === "noto sans sc") {
+        const file = await primaryLoader(request);
+        return {
+          ...file,
+          resolvedFamily: "Noto Sans SC",
+          resolvedWeight: request.weight,
+          resolvedItalic: false,
+        };
+      }
+      return primaryLoader(request);
+    };
+  }
+
+  it("labels a lone arrow as Inter", async () => {
+    const element = mountElement(
+      `<div style="width:40px;height:40px;font-family:system-ui,sans-serif;font-size:16px">→</div>`
+    );
+    const figma = createFigmaConverter({
+      fontLoader: createStationLikeFontLoader(),
+    });
+    const result = await figma.convert({
+      element,
+      width: 40,
+      height: 40,
+    });
+    const textChange = result.document.nodeChanges.find(
+      (c) => c.type === "TEXT"
+    );
+    expect(textChange?.fontName?.family).toBe("Inter");
+  });
+
+  it("does not force Inter for multi-character text containing a symbol", async () => {
+    const element = mountElement(
+      `<div style="width:${FRAME_WIDTH}px;height:${FRAME_HEIGHT}px;font-family:'${TEST_FONT_FAMILY}',sans-serif;font-size:16px">OK →</div>`
+    );
+    const figma = createFigmaConverter({ fontLoader: createTestFontLoader() });
+    const result = await figma.convert({
+      element,
+      width: FRAME_WIDTH,
+      height: FRAME_HEIGHT,
+    });
+    const textChange = result.document.nodeChanges.find(
+      (c) => c.type === "TEXT"
+    );
+    expect(textChange?.fontName?.family).toBe(TEST_FONT_FAMILY);
+  });
+
+  it("does not force Inter for CJK text with an explicit custom face", async () => {
+    const element = mountElement(
+      `<div style="width:${FRAME_WIDTH}px;height:${FRAME_HEIGHT}px;font-family:'${TEST_FONT_FAMILY}',sans-serif;font-size:16px">中</div>`
+    );
+    const figma = createFigmaConverter({ fontLoader: createTestFontLoader() });
+    const result = await figma.convert({
+      element,
+      width: FRAME_WIDTH,
+      height: FRAME_HEIGHT,
+    });
+    const textChange = result.document.nodeChanges.find(
+      (c) => c.type === "TEXT"
+    );
+    expect(textChange?.fontName?.family).toBe(TEST_FONT_FAMILY);
+  });
+
+  it("labels system-stack body text as Noto Sans SC", async () => {
+    const element = mountElement(
+      `<div style="width:${FRAME_WIDTH}px;height:${FRAME_HEIGHT}px;font-family:system-ui,-apple-system,'PingFang SC',sans-serif;font-size:16px;font-weight:700">下载APP</div>`
+    );
+    const figma = createFigmaConverter({
+      fontLoader: createStationLikeFontLoader(),
+    });
+    const result = await figma.convert({
+      element,
+      width: FRAME_WIDTH,
+      height: FRAME_HEIGHT,
+    });
+    const textChange = result.document.nodeChanges.find(
+      (c) => c.type === "TEXT"
+    );
+    expect(textChange?.fontName).toEqual(
+      expect.objectContaining({ family: "Noto Sans SC", style: "Bold" })
+    );
+  });
+
+  it("labels a lone emoji as Inter", async () => {
+    const element = mountElement(
+      `<div style="width:40px;height:40px;font-family:system-ui,sans-serif;font-size:16px;font-weight:700">✅</div>`
+    );
+    const figma = createFigmaConverter({
+      fontLoader: createStationLikeFontLoader(),
+    });
+    const result = await figma.convert({
+      element,
+      width: 40,
+      height: 40,
+    });
+    const textChange = result.document.nodeChanges.find(
+      (c) => c.type === "TEXT"
+    );
+    expect(textChange?.fontName?.family).toBe("Inter");
+    expect(textChange?.fontName?.style).toBe("Bold");
+  });
+
+  it("maps single-symbol Inter weight to Bold for font-weight 700", async () => {
+    const element = mountElement(
+      `<div style="width:40px;height:40px;font-family:system-ui,sans-serif;font-size:16px;font-weight:700">→</div>`
+    );
+    const figma = createFigmaConverter({
+      fontLoader: createStationLikeFontLoader(),
+    });
+    const result = await figma.convert({
+      element,
+      width: 40,
+      height: 40,
+    });
+    const textChange = result.document.nodeChanges.find(
+      (c) => c.type === "TEXT"
+    );
+    expect(textChange?.fontName).toEqual(
+      expect.objectContaining({ family: "Inter", style: "Bold" })
+    );
+    // Family must be bare — weight only in Figma style picker, not "Inter Bold".
+    expect(textChange?.fontName?.family).toBe("Inter");
+    expect(textChange?.fontName?.family).not.toMatch(/Bold|Medium|Light/i);
+  });
+
+  it("keeps Noto Sans SC family bare when style is Bold", async () => {
+    const element = mountElement(
+      `<div style="width:${FRAME_WIDTH}px;height:${FRAME_HEIGHT}px;font-family:system-ui;font-size:16px;font-weight:900">注册流程</div>`
+    );
+    const figma = createFigmaConverter({
+      fontLoader: createStationLikeFontLoader(),
+    });
+    const result = await figma.convert({
+      element,
+      width: FRAME_WIDTH,
+      height: FRAME_HEIGHT,
+    });
+    const textChange = result.document.nodeChanges.find(
+      (c) => c.type === "TEXT"
+    );
+    expect(textChange?.fontName?.family).toBe("Noto Sans SC");
+    expect(textChange?.fontName?.style).toBe("Black");
+    expect(textChange?.fontName?.family).not.toMatch(/Black|Bold|SC Black/i);
+  });
+});

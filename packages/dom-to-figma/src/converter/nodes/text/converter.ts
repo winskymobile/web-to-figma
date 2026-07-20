@@ -120,6 +120,157 @@ type Params = {
   reportDiagnostic: DiagnosticReporter;
 };
 
+/** Station / Figma default for non-symbol system stacks. */
+const DEFAULT_EXPORT_FAMILY = "Noto Sans SC";
+
+/**
+ * True when the text node is a single standalone symbol, punctuation, or emoji
+ * grapheme (e.g. "→", "✓", "✅"). Letters, digits, CJK, and multi-char runs false.
+ *
+ * Emoji may be multiple code points (emoji + VS16 / ZWJ sequences). We treat
+ * the whole trimmed string as one grapheme cluster via Intl.Segmenter when
+ * available, else fall back to Array.from length checks with emoji heuristics.
+ */
+function isSingleSymbolOrEmojiText(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  // ZWJ / multi-code-point emoji sequences as one visual emoji.
+  if (
+    /^\p{Extended_Pictographic}(\uFE0F|\u200D\p{Extended_Pictographic}|\uFE0F)*$/u.test(
+      trimmed
+    )
+  ) {
+    return true;
+  }
+
+  let graphemes: Array<string>;
+  try {
+    const segmenter = new Intl.Segmenter(undefined, {
+      granularity: "grapheme",
+    });
+    graphemes = [...segmenter.segment(trimmed)].map((s) => s.segment);
+  } catch {
+    graphemes = Array.from(trimmed);
+  }
+
+  if (graphemes.length !== 1) {
+    return false;
+  }
+
+  const ch = graphemes[0] ?? trimmed;
+
+  // CJK / kana / hangul keep the CJK primary (including lone "中").
+  if (
+    /^[\u3040-\u30ff\u3130-\u318f\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]$/u.test(
+      ch
+    )
+  ) {
+    return false;
+  }
+
+  // Single letter or number is not a symbol/emoji for this policy.
+  if (/^\p{L}$|^\p{N}$/u.test(ch)) {
+    return false;
+  }
+
+  // Punctuation / symbol (→ ✓ • …)
+  if (/^\p{S}$|^\p{P}$/u.test(ch)) {
+    return true;
+  }
+
+  // Emoji / pictographic (+ optional VS16)
+  if (
+    /\p{Extended_Pictographic}/u.test(ch) ||
+    /\p{Emoji_Presentation}/u.test(ch)
+  ) {
+    return true;
+  }
+
+  // Common emoji that may only match as symbol components after VS16
+  if (/\uFE0F/.test(ch) && /\p{S}/u.test(ch.replace(/\uFE0F/g, ""))) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * CSS primary families that should export as Noto Sans SC (not page system
+ * keywords like PingFang / -apple-system that Figma cannot resolve stably).
+ * Explicit custom faces (Open Sans, brand @font-face, Inter body, …) stay.
+ */
+function isSystemOrCjkStackFamily(family: string): boolean {
+  const key = family.trim().toLowerCase();
+  if (!key) {
+    return true;
+  }
+  if (
+    key === "-apple-system" ||
+    key === "system-ui" ||
+    key === "blinkmacsystemfont" ||
+    key === "segoe ui" ||
+    key === "ui-sans-serif" ||
+    key === "ui-serif" ||
+    key === "ui-monospace" ||
+    key === "sans-serif" ||
+    key === "serif" ||
+    key === "monospace" ||
+    key === "cursive" ||
+    key === "fantasy" ||
+    key === "emoji" ||
+    key === "math" ||
+    key === "fangsong" ||
+    key.startsWith("pingfang") ||
+    key.startsWith("hiragino") ||
+    key.includes("yahei") ||
+    key === "simhei" ||
+    key === "simsun" ||
+    key === "songti sc" ||
+    key === "heiti sc" ||
+    key === "stheiti" ||
+    key === "noto sans cjk sc" ||
+    key === "source han sans sc" ||
+    key === "droid sans fallback" ||
+    key === "arial unicode ms"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Resolve the primary font request for Figma labeling + outline loading.
+ * Single symbol/emoji → Inter; system stacks → Noto Sans SC; else CSS face.
+ */
+function resolvePrimaryFontRequest(
+  text: string,
+  font: {
+    family: string;
+    weight: number;
+    italic: boolean;
+  }
+): { family: string; weight: number; italic: boolean } {
+  if (isSingleSymbolOrEmojiText(text)) {
+    return {
+      family: "Inter",
+      weight: font.weight,
+      italic: font.italic,
+    };
+  }
+  if (isSystemOrCjkStackFamily(font.family)) {
+    return {
+      family: DEFAULT_EXPORT_FAMILY,
+      weight: font.weight,
+      // Noto Sans SC station faces are upright; drop italic for stable styles.
+      italic: false,
+    };
+  }
+  return font;
+}
+
 export async function nodeToTextNodeChange(
   node: Element | Text,
   options: Params
@@ -251,7 +402,12 @@ export async function nodeToTextNodeChange(
 
   const { font, ...styles } = parseTextProperties(element);
 
-  const loadedFont = await fontCache.get(font);
+  // Lone symbol/emoji → Inter primary. System/CJK stacks → Noto Sans SC.
+  // Explicit custom faces keep CSS family. Weight maps via loader style buckets.
+  // Multi-char runs keep Inter outline fallback for missing glyphs below.
+  const primaryFont = resolvePrimaryFontRequest(text, font);
+
+  const loadedFont = await fontCache.get(primaryFont);
   for (const diagnostic of loadedFont.diagnostics) {
     reportDiagnostic(diagnostic);
   }
@@ -288,22 +444,26 @@ export async function nodeToTextNodeChange(
   });
 
   // CJK subset faces (e.g. Noto Sans SC) often omit arrows/checkmarks.
-  // Load a latin face so missing code points still get real outlines.
-  // Never fall back to commandsBlob 0 — that reuses another character's path
-  // (e.g. "→" showing as "和" until the text is re-edited in Figma).
+  // Load Inter outlines for missing code points inside multi-character runs.
+  // Single-symbol nodes already use Inter as primary (above).
+  // Never fall back to commandsBlob 0 — that reuses another character's path.
   let symbolFallback: typeof loadedFont | null = null;
-  try {
-    symbolFallback = await fontCache.get({
-      family: "Inter",
-      weight: loadedFont.actualWeight ?? loadedFont.properties.weight ?? 400,
-      italic: font.italic,
-      purpose: "symbol-fallback",
-    });
-    for (const diagnostic of symbolFallback.diagnostics) {
-      reportDiagnostic(diagnostic);
+  const primaryIsInter =
+    loadedFont.actualFamily.trim().toLowerCase() === "inter";
+  if (!primaryIsInter) {
+    try {
+      symbolFallback = await fontCache.get({
+        family: "Inter",
+        weight: loadedFont.actualWeight ?? loadedFont.properties.weight ?? 400,
+        italic: font.italic,
+        purpose: "symbol-fallback",
+      });
+      for (const diagnostic of symbolFallback.diagnostics) {
+        reportDiagnostic(diagnostic);
+      }
+    } catch {
+      symbolFallback = null;
     }
-  } catch {
-    symbolFallback = null;
   }
 
   const glyphs = processGlyphs(
@@ -543,6 +703,7 @@ export async function nodeToTextNodeChange(
     },
     fontName: {
       // Embedded/resolved face — never CSS keywords like `-apple-system`.
+      // Lone symbols/emoji → Inter; system stacks → Noto Sans SC (style from weight).
       family: loadedFont.actualFamily,
       style: loadedFont.fontStyleName,
       postscript: loadedFont.postScriptName,

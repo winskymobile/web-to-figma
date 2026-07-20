@@ -63,7 +63,8 @@ export function createCjkAwareFontLoader(): FontLoader {
         const file = await loadFullInter(weight, request.italic);
         return {
           ...file,
-          resolvedFamily: familyKey === "inter" ? undefined : "Inter",
+          // Always label bare "Inter"; weight is only in style via loader.
+          resolvedFamily: "Inter",
         };
       }
       const file = await latinLoader({
@@ -74,8 +75,7 @@ export function createCjkAwareFontLoader(): FontLoader {
       return {
         ...file,
         resolvedWeight: weight,
-        resolvedFamily:
-          request.family.trim().toLowerCase() === "inter" ? undefined : "Inter",
+        resolvedFamily: "Inter",
       };
     }
 
@@ -89,10 +89,9 @@ export function createCjkAwareFontLoader(): FontLoader {
         bytes: file.bytes,
         resolvedWeight: weight,
         resolvedItalic: false,
-        resolvedFamily:
-          request.family.trim().toLowerCase() === CJK_FAMILY.toLowerCase()
-            ? undefined
-            : CJK_FAMILY,
+        // Always expose the station CJK family so Figma fontName stays
+        // "Noto Sans SC" even when the OT name table differs slightly.
+        resolvedFamily: CJK_FAMILY,
       };
     } catch {
       const file = await loadFullInter(weight, request.italic);
