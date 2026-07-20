@@ -15,7 +15,7 @@ createRoot(root).render(
     <App />
     <Toaster
       closeButton
-      position="top-center"
+      position="bottom-center"
       richColors
       theme="light"
       toastOptions={{

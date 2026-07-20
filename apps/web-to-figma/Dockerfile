@@ -36,4 +36,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD wget -qO- http://127.0.0.1/ >/dev/null || exit 1
 CMD ["nginx", "-g", "daemon off;"]
 
-# rebuild-stamp: upstream-dom-to-figma
+# rebuild-stamp: copy-success-tip 2026-07-20T08:13:06Z

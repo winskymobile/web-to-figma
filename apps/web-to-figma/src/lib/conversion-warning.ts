@@ -18,6 +18,18 @@ export type DiagnosticGroup = {
   reasons: Array<{ reason: string; count: number }>;
 };
 
+export type ConversionNotice = {
+  hasIssues: true;
+  failedFaces: number;
+  diagnosticTotal: number;
+  groups: Array<DiagnosticGroup>;
+  /** Short line for collapsed toast body */
+  summaryLine: string;
+  /** Group lines for expanded detail */
+  detailLines: Array<string>;
+  footer: string;
+};
+
 /** Group converter diagnostics by code (and reason) for UI summaries. */
 export function summarizeDiagnostics(
   diagnostics: ReadonlyArray<ConverterDiagnostic>
@@ -62,29 +74,64 @@ function formatGroup(group: DiagnosticGroup): string {
   return `${group.label} ${group.count} 处${reasonPart}`;
 }
 
-/** Shared non-blocking warning decision used by App and integration tests. */
-export function formatConversionWarning(
+const NOTICE_FOOTER = "复制已继续，导出可能与预览不完全一致";
+
+/** Structured notice for unified copy-result UI. */
+export function buildConversionNotice(
   fontStats: PrepareFontsStats,
   diagnostics: ReadonlyArray<ConverterDiagnostic>
-): string | null {
+): ConversionNotice | null {
   if (fontStats.failedFaces === 0 && diagnostics.length === 0) {
     return null;
   }
 
-  const parts: Array<string> = [];
+  const groups =
+    diagnostics.length > 0 ? summarizeDiagnostics(diagnostics) : [];
+  const summaryParts: Array<string> = [];
   if (fontStats.failedFaces > 0) {
-    parts.push(`${fontStats.failedFaces} 个预览字体加载失败`);
+    summaryParts.push(`${fontStats.failedFaces} 个预览字体加载失败`);
   }
-
   if (diagnostics.length > 0) {
-    const groups = summarizeDiagnostics(diagnostics);
-    const top = groups.slice(0, 4).map(formatGroup);
-    parts.push(
-      `转换提示 ${diagnostics.length} 项：${top.join("；")}${
-        groups.length > 4 ? "…" : ""
-      }`
-    );
+    summaryParts.push(`转换提示 ${diagnostics.length} 项`);
   }
 
-  return `${parts.join("。")}。复制已继续，导出可能与预览不完全一致`;
+  const detailLines = groups.slice(0, 6).map(formatGroup);
+  if (groups.length > 6) {
+    detailLines.push(`…另有 ${groups.length - 6} 类`);
+  }
+
+  return {
+    hasIssues: true,
+    failedFaces: fontStats.failedFaces,
+    diagnosticTotal: diagnostics.length,
+    groups,
+    summaryLine: summaryParts.join(" · "),
+    detailLines,
+    footer: NOTICE_FOOTER,
+  };
+}
+
+/** Shared non-blocking warning string (tests + legacy). */
+export function formatConversionWarning(
+  fontStats: PrepareFontsStats,
+  diagnostics: ReadonlyArray<ConverterDiagnostic>
+): string | null {
+  const notice = buildConversionNotice(fontStats, diagnostics);
+  if (!notice) {
+    return null;
+  }
+  const detail =
+    notice.detailLines.length > 0
+      ? `：${notice.detailLines.slice(0, 4).join("；")}${
+          notice.detailLines.length > 4 ? "…" : ""
+        }`
+      : "";
+  // Preserve previous shape: summary pieces + “转换提示 N 项：…” when diagnostics exist
+  if (notice.failedFaces > 0 && notice.diagnosticTotal > 0) {
+    return `${notice.failedFaces} 个预览字体加载失败。转换提示 ${notice.diagnosticTotal} 项${detail}。${notice.footer}`;
+  }
+  if (notice.failedFaces > 0) {
+    return `${notice.failedFaces} 个预览字体加载失败。${notice.footer}`;
+  }
+  return `转换提示 ${notice.diagnosticTotal} 项${detail}。${notice.footer}`;
 }

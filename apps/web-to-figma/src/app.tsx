@@ -7,7 +7,7 @@ import { ResourcePrompt } from "./components/resource-prompt";
 import { Toolbar } from "./components/toolbar";
 import { type AssetIndex, countUniqueAssets } from "./lib/asset-map";
 import { createBuildGenerationCoordinator } from "./lib/build-generation";
-import { formatConversionWarning } from "./lib/conversion-warning";
+import { buildConversionNotice } from "./lib/conversion-warning";
 import { setPreviewDocument, withPreviewConverter } from "./lib/converter";
 import { pickAssetFolder } from "./lib/pick-folder";
 import { preparePreviewFontsForConvert } from "./lib/prepare-preview-fonts";
@@ -71,6 +71,16 @@ export function App() {
     loadViewportPreset()
   );
   const [buildCoordinator] = useState(createBuildGenerationCoordinator);
+  const [conversionNotice, setConversionNotice] = useState<
+    import("./lib/conversion-warning").ConversionNotice | null
+  >(null);
+  const [copyStatus, setCopyStatus] = useState<
+    "idle" | "working" | "success" | "error"
+  >("idle");
+  const [copyStatusMessage, setCopyStatusMessage] = useState<string | null>(
+    null
+  );
+  const copyStatusTimerRef = useRef<number | null>(null);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const objectUrlsRef = useRef<Array<string>>([]);
@@ -111,6 +121,13 @@ export function App() {
     setPreviewReadiness(false);
     skippedPromptForHtml.current = null;
     setPreviewDocument(null);
+    setConversionNotice(null);
+    setCopyStatus("idle");
+    setCopyStatusMessage(null);
+    if (copyStatusTimerRef.current != null) {
+      window.clearTimeout(copyStatusTimerRef.current);
+      copyStatusTimerRef.current = null;
+    }
   }, [buildCoordinator, setPreviewReadiness]);
 
   useEffect(() => {
@@ -210,6 +227,7 @@ export function App() {
         skippedPromptForHtml.current = null;
       }
       setHtmlFile(file);
+      setConversionNotice(null);
       const index = assetIndex ?? new Map();
       await rebuildPreview(file, index, folderName, { offerPrompt: true });
     },
@@ -225,18 +243,9 @@ export function App() {
       setFolderName(root);
       setPromptOpen(false);
       if (htmlFile) {
-        const committed = await rebuildPreview(htmlFile, index, root, {
+        await rebuildPreview(htmlFile, index, root, {
           offerPrompt: false,
         });
-        if (committed) {
-          toast.success(
-            `已加载资源目录 ${root}（${countUniqueAssets(index)} 个文件）`
-          );
-        }
-      } else {
-        toast.success(
-          `已索引 ${countUniqueAssets(index)} 个资源（${root}），请再选择 HTML`
-        );
       }
     },
     [htmlFile, rebuildPreview]
@@ -280,6 +289,22 @@ export function App() {
 
   const logicalWidth = viewport.width;
 
+  const clearCopyStatusTimer = () => {
+    if (copyStatusTimerRef.current != null) {
+      window.clearTimeout(copyStatusTimerRef.current);
+      copyStatusTimerRef.current = null;
+    }
+  };
+
+  const scheduleCopyStatusClear = (ms: number) => {
+    clearCopyStatusTimer();
+    copyStatusTimerRef.current = window.setTimeout(() => {
+      setCopyStatus("idle");
+      setCopyStatusMessage(null);
+      copyStatusTimerRef.current = null;
+    }, ms);
+  };
+
   const onCopy = async () => {
     if (copyingRef.current) {
       return;
@@ -307,7 +332,10 @@ export function App() {
 
     copyingRef.current = true;
     setCopying(true);
-    const toastId = toast.loading("正在统一字体并转换为 Figma 图层…");
+    clearCopyStatusTimer();
+    setCopyStatus("working");
+    setCopyStatusMessage("正在统一字体并转换为 Figma 图层…");
+    setConversionNotice(null);
     try {
       await withPreviewConverter(async (converter) => {
         let restoreFonts: (() => void) | undefined;
@@ -346,22 +374,11 @@ export function App() {
             name: session?.htmlName?.replace(/\.html?$/i, "") || "web-to-figma",
           });
           await writeConversionToClipboard(result);
-          toast.success("已复制。打开 Figma 按 ⌘V / Ctrl+V 粘贴", {
-            id: toastId,
-          });
-          const conversionWarning = formatConversionWarning(
-            fontStats,
-            result.diagnostics
-          );
-          if (conversionWarning) {
-            toast.message(conversionWarning, { duration: 6000 });
-          } else if (
-            fontStats.remappedElements > 0 &&
-            fontStats.preservedCustomFamilies === 0
-          ) {
-            // Soft note only when everything used system stacks
-            // (avoid noisy toasts on normal brand-font pages).
-          }
+          const notice = buildConversionNotice(fontStats, result.diagnostics);
+          setConversionNotice(notice);
+          setCopyStatus("success");
+          setCopyStatusMessage("已复制。打开 Figma 按 ⌘V / Ctrl+V 粘贴");
+          scheduleCopyStatusClear(4500);
         } finally {
           try {
             restoreFonts?.();
@@ -372,7 +389,9 @@ export function App() {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : "复制失败";
-      toast.error(`复制失败：${message}`, { id: toastId, duration: 8000 });
+      setCopyStatus("idle");
+      setCopyStatusMessage(null);
+      toast.error(`复制失败：${message}`, { duration: 8000 });
       console.error("[web-to-figma] copy failed", err);
     } finally {
       copyingRef.current = false;
@@ -391,7 +410,10 @@ export function App() {
         building={building}
         canClear={Boolean(session || htmlFile)}
         canCopy={Boolean(session) && !building && previewReady}
+        conversionNotice={conversionNotice}
         copying={copying}
+        copyStatus={copyStatus}
+        copyStatusMessage={copyStatusMessage}
         folderLabel={folderName}
         htmlName={htmlFile?.name ?? session?.htmlName ?? null}
         localRefCount={session?.localRefs.length ?? pendingRefs.length}

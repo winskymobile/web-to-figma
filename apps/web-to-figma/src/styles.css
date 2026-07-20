@@ -67,3 +67,11 @@ label {
     transition: none !important;
   }
 }
+
+/* Sonner: unified copy-result toast */
+[data-sonner-toaster][data-y-position="bottom"] {
+  bottom: 16px;
+}
+[data-sonner-toast] [data-content] {
+  width: 100%;
+}

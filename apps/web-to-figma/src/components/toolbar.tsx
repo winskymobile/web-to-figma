@@ -1,11 +1,12 @@
 import type { ReactNode, RefObject } from "react";
 import { useEffect, useRef, useState } from "react";
-
+import type { ConversionNotice } from "../lib/conversion-warning";
 import {
   type DeviceKind,
   type ViewportPreset,
   widthsFor,
 } from "../lib/viewport";
+import { ConversionNoticeBadge } from "./conversion-notice-badge";
 
 type ToolbarProps = {
   htmlName: string | null;
@@ -18,6 +19,9 @@ type ToolbarProps = {
   canClear: boolean;
   canCopy: boolean;
   copying: boolean;
+  conversionNotice: ConversionNotice | null;
+  copyStatus: "idle" | "working" | "success" | "error";
+  copyStatusMessage: string | null;
   viewport: ViewportPreset;
   onDeviceKindChange: (kind: DeviceKind) => void;
   onViewportWidthChange: (width: number) => void;
@@ -38,6 +42,9 @@ export function Toolbar({
   canClear,
   canCopy,
   copying,
+  conversionNotice,
+  copyStatus,
+  copyStatusMessage,
   viewport,
   onDeviceKindChange,
   onViewportWidthChange,
@@ -102,7 +109,7 @@ export function Toolbar({
           : `${htmlName} · 无本地资源引用`;
 
   return (
-    <header className="z-10 grid min-h-[52px] grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 border-[var(--line)] border-b bg-[var(--bg)] px-3.5 py-2">
+    <header className="relative z-10 grid min-h-[52px] grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 border-[var(--line)] border-b bg-[var(--bg)] px-3.5 py-2">
       <div className="flex min-w-0 items-center gap-2.5">
         <div className="mr-0.5 flex shrink-0 select-none items-center gap-2.5 border-[var(--line)] border-r pr-3">
           <span
@@ -116,122 +123,131 @@ export function Toolbar({
           </span>
         </div>
 
-        <div className="relative min-w-0 flex-1" ref={wrapRef}>
-          <button
-            aria-expanded={Boolean(htmlName) && !copying && open}
-            aria-haspopup={htmlName ? "dialog" : undefined}
-            className={[
-              "inline-flex h-[34px] max-w-full items-center gap-2 rounded-[var(--radius)] border border-[var(--line)] bg-white px-3 text-left text-[14px] shadow-[var(--shadow-chip)] transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-[var(--primary-ring)]",
-              htmlName && !copying
-                ? "cursor-pointer hover:bg-[var(--bg-subtle)]"
-                : "cursor-default opacity-70",
-            ].join(" ")}
-            disabled={!htmlName || copying}
-            onClick={() => {
-              if (!htmlName) {
-                return;
-              }
-              setOpen((v) => !v);
-            }}
-            type="button"
-          >
-            <span className="min-w-0 truncate text-[var(--muted)]">
-              {htmlName ? (
-                <>
-                  <strong className="font-medium text-[var(--ink)]">
-                    {htmlName}
-                  </strong>
-                  {folderLabel ? (
-                    <span>
-                      {" "}
-                      · {folderLabel}
-                      {rewrittenCount > 0 ? ` · 已关联 ${rewrittenCount}` : ""}
-                    </span>
-                  ) : localRefCount > 0 ? (
-                    <span> · 待添加资源（{localRefCount}）</span>
-                  ) : building ? (
-                    <span> · 构建中…</span>
-                  ) : (
-                    <span> · 已加载</span>
-                  )}
-                </>
-              ) : (
-                summary
-              )}
-            </span>
-            {missing.length > 0 ? (
-              <span className="shrink-0 rounded-full border border-[var(--warn-line)] bg-[var(--warn-bg)] px-2 py-0.5 font-medium text-[13px] text-[var(--warn-ink)]">
-                缺失 {missing.length}
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <div className="relative min-w-0 max-w-full" ref={wrapRef}>
+            <button
+              aria-expanded={Boolean(htmlName) && !copying && open}
+              aria-haspopup={htmlName ? "dialog" : undefined}
+              className={[
+                "inline-flex h-[34px] max-w-full items-center gap-2 rounded-[var(--radius)] border border-[var(--line)] bg-white px-3 text-left text-[14px] shadow-[var(--shadow-chip)] transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-[var(--primary-ring)]",
+                htmlName && !copying
+                  ? "cursor-pointer hover:bg-[var(--bg-subtle)]"
+                  : "cursor-default opacity-70",
+              ].join(" ")}
+              disabled={!htmlName || copying}
+              onClick={() => {
+                if (!htmlName) {
+                  return;
+                }
+                setOpen((v) => !v);
+              }}
+              type="button"
+            >
+              <span className="min-w-0 truncate text-[var(--muted)]">
+                {htmlName ? (
+                  <>
+                    <strong className="font-medium text-[var(--ink)]">
+                      {htmlName}
+                    </strong>
+                    {folderLabel ? (
+                      <span>
+                        {" "}
+                        · {folderLabel}
+                        {rewrittenCount > 0
+                          ? ` · 已关联 ${rewrittenCount}`
+                          : ""}
+                      </span>
+                    ) : localRefCount > 0 ? (
+                      <span> · 待添加资源（{localRefCount}）</span>
+                    ) : building ? (
+                      <span> · 构建中…</span>
+                    ) : (
+                      <span> · 已加载</span>
+                    )}
+                  </>
+                ) : (
+                  summary
+                )}
               </span>
-            ) : null}
-            {htmlName ? <Chevron open={open} /> : null}
-          </button>
-
-          {htmlName && open && !copying ? (
-            <div className="absolute top-[calc(100%+6px)] left-0 z-20 w-[min(360px,calc(100vw-24px))] rounded-xl border border-[var(--line)] bg-white p-3 shadow-[0_12px_40px_rgb(0_0_0/0.12)]">
-              <Section title="文档">
-                <Row label="HTML" value={htmlName ?? "—"} />
-                <Row
-                  label="资源目录"
-                  value={
-                    folderLabel
-                      ? `${folderLabel}（索引 ${assetCount} 个文件）`
-                      : "未选择"
-                  }
-                />
-                <Row
-                  label="本地引用"
-                  value={
-                    localRefCount > 0 ? `${localRefCount} 项` : "无相对路径资源"
-                  }
-                />
-                <Row
-                  label="已关联"
-                  value={folderLabel ? `${rewrittenCount}` : "—"}
-                />
-              </Section>
-
               {missing.length > 0 ? (
-                <Section title={`缺失（${missing.length}）`}>
-                  <ul className="m-0 max-h-28 list-none space-y-1 overflow-auto p-0 font-mono text-[13px] text-[var(--muted)]">
-                    {missing.slice(0, 20).map((m) => (
-                      <li
-                        className="truncate rounded bg-[var(--bg-subtle)] px-1.5 py-1"
-                        key={m}
-                      >
-                        {m}
-                      </li>
-                    ))}
-                    {missing.length > 20 ? (
-                      <li className="text-[var(--muted-2)]">
-                        …另有 {missing.length - 20} 项
-                      </li>
-                    ) : null}
-                  </ul>
-                </Section>
+                <span className="shrink-0 rounded-full border border-[var(--warn-line)] bg-[var(--warn-bg)] px-2 py-0.5 font-medium text-[13px] text-[var(--warn-ink)]">
+                  缺失 {missing.length}
+                </span>
               ) : null}
+              {htmlName ? <Chevron open={open} /> : null}
+            </button>
 
-              <div className="mt-3 flex flex-wrap gap-2 border-[var(--line)] border-t pt-3">
-                <MiniBtn
-                  disabled={copying}
-                  onClick={() => {
-                    setOpen(false);
-                    onChangeHtml();
-                  }}
-                >
-                  更换 HTML
-                </MiniBtn>
-                <MiniBtn
-                  disabled={copying}
-                  onClick={() => {
-                    setOpen(false);
-                    onAddAssets();
-                  }}
-                >
-                  {folderLabel ? "更换资源文件夹" : "添加资源文件夹"}
-                </MiniBtn>
+            {htmlName && open && !copying ? (
+              <div className="absolute top-[calc(100%+6px)] left-0 z-20 w-[min(360px,calc(100vw-24px))] rounded-xl border border-[var(--line)] bg-white p-3 shadow-[0_12px_40px_rgb(0_0_0/0.12)]">
+                <Section title="文档">
+                  <Row label="HTML" value={htmlName ?? "—"} />
+                  <Row
+                    label="资源目录"
+                    value={
+                      folderLabel
+                        ? `${folderLabel}（索引 ${assetCount} 个文件）`
+                        : "未选择"
+                    }
+                  />
+                  <Row
+                    label="本地引用"
+                    value={
+                      localRefCount > 0
+                        ? `${localRefCount} 项`
+                        : "无相对路径资源"
+                    }
+                  />
+                  <Row
+                    label="已关联"
+                    value={folderLabel ? `${rewrittenCount}` : "—"}
+                  />
+                </Section>
+
+                {missing.length > 0 ? (
+                  <Section title={`缺失（${missing.length}）`}>
+                    <ul className="m-0 max-h-28 list-none space-y-1 overflow-auto p-0 font-mono text-[13px] text-[var(--muted)]">
+                      {missing.slice(0, 20).map((m) => (
+                        <li
+                          className="truncate rounded bg-[var(--bg-subtle)] px-1.5 py-1"
+                          key={m}
+                        >
+                          {m}
+                        </li>
+                      ))}
+                      {missing.length > 20 ? (
+                        <li className="text-[var(--muted-2)]">
+                          …另有 {missing.length - 20} 项
+                        </li>
+                      ) : null}
+                    </ul>
+                  </Section>
+                ) : null}
+
+                <div className="mt-3 flex flex-wrap gap-2 border-[var(--line)] border-t pt-3">
+                  <MiniBtn
+                    disabled={copying}
+                    onClick={() => {
+                      setOpen(false);
+                      onChangeHtml();
+                    }}
+                  >
+                    更换 HTML
+                  </MiniBtn>
+                  <MiniBtn
+                    disabled={copying}
+                    onClick={() => {
+                      setOpen(false);
+                      onAddAssets();
+                    }}
+                  >
+                    {folderLabel ? "更换资源文件夹" : "添加资源文件夹"}
+                  </MiniBtn>
+                </div>
               </div>
-            </div>
+            ) : null}
+          </div>
+          {conversionNotice ? (
+            <ConversionNoticeBadge notice={conversionNotice} />
           ) : null}
         </div>
       </div>
@@ -266,6 +282,21 @@ export function Toolbar({
           {copying ? "复制中…" : "复制到 Figma"}
         </button>
       </div>
+      {(copyStatus === "working" || copyStatus === "success") &&
+      copyStatusMessage ? (
+        <div
+          aria-live="polite"
+          className={[
+            "pointer-events-none absolute top-full right-3.5 z-30 mt-2 w-max max-w-[min(280px,calc(100vw-24px))] rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-left text-[12.5px] leading-snug shadow-[0_8px_24px_rgb(0_0_0/0.12)]",
+            copyStatus === "success"
+              ? "font-medium text-[var(--ink)]"
+              : "text-[var(--muted)]",
+          ].join(" ")}
+          role="status"
+        >
+          {copyStatusMessage}
+        </div>
+      ) : null}
     </header>
   );
 }

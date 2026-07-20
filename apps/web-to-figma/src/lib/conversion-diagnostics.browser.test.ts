@@ -78,6 +78,8 @@ describe("conversion degradation reporting", () => {
       },
       result.diagnostics
     );
-    expect(warning).toContain("1 个转换降级或错误");
+    expect(warning).toContain("转换提示");
+    expect(warning).toContain("页面字体读取失败");
+    expect(warning).toContain("复制已继续");
   });
 });
