@@ -14,9 +14,27 @@ export type FigmaTextCase =
   | "SMALL_CAPS"
   | "SMALL_CAPS_FORCED";
 
+export type FigmaTextStyleOverride = {
+  styleID: number;
+  fillPaints?: Array<import("./paint").FigmaPaint>;
+  fontSize?: number;
+  fontName?: {
+    family: string;
+    style: string;
+    postscript?: string;
+  };
+  textDecoration?: FigmaTextDecoration;
+  /** Additional NodeChange-compatible fields may be present for kiwi encode. */
+  [key: string]: unknown;
+};
+
 export type FigmaTextData = {
   characters: string;
   lines?: Array<unknown>;
+  /** Per UTF-16 code unit style id; 0 = default node style. */
+  characterStyleIDs?: Array<number>;
+  /** Sparse style nodes keyed by styleID (Figma TextData table). */
+  styleOverrideTable?: Array<FigmaTextStyleOverride>;
 };
 
 export type FigmaDerivedTextData = {

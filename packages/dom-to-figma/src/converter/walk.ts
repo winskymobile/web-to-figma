@@ -21,6 +21,10 @@ import type { InferredChildStack } from "./layout/infer";
 import { convertDecorativePseudo } from "./nodes/pseudo/converter";
 import { rasterizeMaskedPseudo } from "./nodes/pseudo/raster";
 import { nodeToTextNodeChange } from "./nodes/text";
+import {
+  buildCharacterStyles,
+  flattenRichInline,
+} from "./nodes/text/rich-inline";
 import type { FigmaBlob, FigmaGuid, FigmaNodeChange } from "./types";
 
 export type Classify = (
@@ -233,6 +237,36 @@ async function walkNode(
     );
     if (inlineCount !== null) {
       return inlineCount;
+    }
+
+    // Scheme C: simple rich-inline hosts (em + br titles) → one TEXT layer.
+    if (kind === "frame" || kind === "text") {
+      const flat = flattenRichInline(node);
+      if (flat) {
+        const guid = ctx.createGuid();
+        const position = getElementPositionRelativeToParent(node);
+        const rect = node.getBoundingClientRect();
+        const characterStyles = buildCharacterStyles(flat) ?? undefined;
+        const change = await nodeToTextNodeChange(node, {
+          guid,
+          parentGuid,
+          childIndex,
+          position,
+          size: { width: rect.width, height: rect.height },
+          textContent: flat.characters,
+          characterStyles,
+          registerBlob: ctx.registerBlob,
+          inheritedProperties,
+          fontCache: ctx.fontCache,
+          reportDiagnostic: ctx.reportDiagnostic,
+        });
+        // Prefer host box height when multi-line soft metrics differ slightly.
+        if (change.size) {
+          change.size = { x: rect.width, y: rect.height };
+        }
+        ctx.appendChanges([change]);
+        return 1;
+      }
     }
 
     const guid = ctx.createGuid();

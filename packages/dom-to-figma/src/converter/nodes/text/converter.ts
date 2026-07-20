@@ -104,6 +104,14 @@ type Params = {
   position: Position;
   size?: Size;
   textContent?: string;
+  /** Per-character style ids + table for rich-inline hosts (scheme C). */
+  characterStyles?: {
+    characterStyleIDs: Array<number>;
+    styleOverrideTable: Array<{
+      styleID: number;
+      fillPaints: Array<FigmaPaint>;
+    }>;
+  };
   registerBlob: (blob: FigmaBlob) => number;
   inheritedProperties?: {
     textGradient?: Array<FigmaPaint>;
@@ -125,6 +133,7 @@ export async function nodeToTextNodeChange(
     size,
     inheritedProperties,
     textContent,
+    characterStyles,
     fontCache,
     reportDiagnostic,
   } = options;
@@ -140,6 +149,7 @@ export async function nodeToTextNodeChange(
   const computedStyle = window.getComputedStyle(element);
 
   const defaultTextContent = node.textContent?.trim() ?? "";
+  // Caller-provided content (rich-inline flatten) keeps internal newlines/spaces.
   const rawText = textContent ?? defaultTextContent;
 
   const defaultSize = isTextNodeValue
@@ -218,7 +228,8 @@ export async function nodeToTextNodeChange(
   // Whether the browser actually wrapped this text. If it didn't, we must not
   // wrap it in `derivedTextData` either — OpenType.js's metrics differ slightly
   // from the browser's and can spuriously break a line that fits in the DOM.
-  const isSingleLine = isTextOnSingleLine(node);
+  // Hard newlines from rich-inline flatten always force multi-line layout.
+  const isSingleLine = !text.includes("\n") && isTextOnSingleLine(node);
 
   const letterSpacing =
     computedStyle.letterSpacing !== "normal"
@@ -353,6 +364,12 @@ export async function nodeToTextNodeChange(
           isFirstLineOfList: false,
         },
       ],
+      ...(characterStyles
+        ? {
+            characterStyleIDs: characterStyles.characterStyleIDs,
+            styleOverrideTable: characterStyles.styleOverrideTable,
+          }
+        : {}),
     },
     derivedTextData: {
       layoutSize: {

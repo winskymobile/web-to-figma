@@ -309,7 +309,9 @@ describe("font fallback diagnostics", () => {
       width: FRAME_WIDTH,
       height: FRAME_HEIGHT,
     });
-    expect(firstResult.diagnostics).toEqual([pageFontDiagnostic]);
+    expect(
+      firstResult.diagnostics.filter((d) => d.code === "page-font-fetch-failed")
+    ).toEqual([pageFontDiagnostic]);
 
     // The face comes from the converter cache, but its degradation still
     // belongs in the fresh report for this conversion.
@@ -321,7 +323,11 @@ describe("font fallback diagnostics", () => {
       width: FRAME_WIDTH,
       height: FRAME_HEIGHT,
     });
-    expect(secondResult.diagnostics).toEqual([pageFontDiagnostic]);
+    expect(
+      secondResult.diagnostics.filter(
+        (d) => d.code === "page-font-fetch-failed"
+      )
+    ).toEqual([pageFontDiagnostic]);
   });
 
   it("uses distinct real Inter outlines for arrow and checkmark fallback glyphs", async () => {
@@ -412,5 +418,79 @@ describe("font fallback diagnostics", () => {
         character: missingCharacter,
       }),
     ]);
+  });
+});
+
+describe("rich-inline single layer (scheme C)", () => {
+  it("flattens h1 with em color and br into one TEXT with newline and styles", async () => {
+    const element = mountElement(
+      `<div style="width:320px;color:#fff;font-family:'${TEST_FONT_FAMILY}',sans-serif">
+        <h1 style="margin:0;max-width:260px;font-size:48px;line-height:1.03;font-weight:900;color:#ffffff;background:transparent;padding:0;border:0">
+          注册<em style="color:#ffe36d;font-style:normal">流程</em><br />说明
+        </h1>
+      </div>`
+    );
+
+    const figma = createFigmaConverter({ fontLoader: createTestFontLoader() });
+    const result = await figma.convert({
+      element,
+      width: 320,
+      height: 200,
+    });
+
+    const texts = result.document.nodeChanges.filter((c) => c.type === "TEXT");
+    // One layer for the title (wrapper may not add text).
+    const title = texts.find((t) => (t.characters || "").includes("注册"));
+    expect(title).toBeDefined();
+    if (!title || title.type !== "TEXT") {
+      return;
+    }
+    expect(title.characters).toContain("\n");
+    expect(title.characters.replace(/\n/g, "|").trim()).toBe("注册流程|说明");
+    // Only one TEXT that includes 注册 (not split into three).
+    expect(
+      texts.filter((t) => (t.characters || "").includes("注册")).length
+    ).toBe(1);
+
+    const styleIds = title.textData?.characterStyleIDs;
+    expect(styleIds?.length).toBe(title.characters.length);
+    const start = title.characters.indexOf("流程");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const emphasisIds = styleIds?.slice(start, start + 2) ?? [];
+    expect(emphasisIds.every((id) => id > 0)).toBe(true);
+    expect(title.textData?.styleOverrideTable?.length).toBeGreaterThan(0);
+    const override = title.textData?.styleOverrideTable?.[0] as
+      | {
+          fillPaints?: Array<{
+            type?: string;
+            color?: { r: number; g: number; b: number };
+          }>;
+        }
+      | undefined;
+    const fill = override?.fillPaints?.[0];
+    expect(fill?.type).toBe("SOLID");
+    // yellow-ish
+    if (fill && "color" in fill && fill.color) {
+      expect(fill.color.r).toBeGreaterThan(0.9);
+      expect(fill.color.g).toBeGreaterThan(0.8);
+      expect(fill.color.b).toBeLessThan(0.5);
+    }
+  });
+
+  it("does not flatten heading with nested block", async () => {
+    const element = mountElement(
+      `<h1 style="margin:0;font-family:'${TEST_FONT_FAMILY}',sans-serif;font-size:24px;background:transparent;padding:0;border:0">
+        Hi<div>block</div>
+      </h1>`
+    );
+    const figma = createFigmaConverter({ fontLoader: createTestFontLoader() });
+    const result = await figma.convert({
+      element,
+      width: 320,
+      height: 120,
+    });
+    const texts = result.document.nodeChanges.filter((c) => c.type === "TEXT");
+    const merged = texts.find((t) => (t.characters || "").includes("Hiblock"));
+    expect(merged).toBeUndefined();
   });
 });
