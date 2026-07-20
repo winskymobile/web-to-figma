@@ -227,15 +227,25 @@ export function tryInferAutoLayout(element: Element): TryInferAutoLayoutResult {
       pathReason = r.reason;
     }
   } else {
-    const block = inferBlockStack(input);
-    if (block.ok) {
-      inferred = block.value;
+    // Single-row 2-track grids (auto/1fr headers) before block/wrap.
+    const single = inferSingleRowGridStack(input);
+    if (single.ok) {
+      inferred = single.value;
     } else {
-      const wrap = inferWrapStack(input, "grid");
-      if (wrap.ok) {
-        inferred = wrap.value;
+      const block = inferBlockStack(input);
+      if (block.ok) {
+        inferred = block.value;
       } else {
-        pathReason = wrap.reason !== "unhandled" ? wrap.reason : block.reason;
+        const wrap = inferWrapStack(input, "grid");
+        if (wrap.ok) {
+          inferred = wrap.value;
+        } else if (single.reason !== "unhandled") {
+          pathReason = single.reason;
+        } else if (wrap.reason !== "unhandled") {
+          pathReason = wrap.reason;
+        } else {
+          pathReason = block.reason;
+        }
       }
     }
   }
@@ -455,6 +465,237 @@ function inferFlexStack(
       reverseChildren: reversed || undefined,
     },
   };
+}
+
+/**
+ * Two-child single-row CSS Grid (typical `auto 1fr` / `max-content 1fr`
+ * headers) as a non-wrapping HORIZONTAL stack. Wrap simulation does not
+ * model unequal track sizing, so this path must run first for grids.
+ */
+function inferSingleRowGridStack(
+  input: StackInferenceInput
+):
+  | { ok: true; value: StackInference }
+  | { ok: false; reason: LayoutInferBailReason } {
+  const { element, style, flow, childRects, parentSize } = input;
+  if (flow.length !== 2 || childRects.length !== 2) {
+    return { ok: false, reason: "unhandled" };
+  }
+  if (!flow.every(isElementFlowItem)) {
+    return { ok: false, reason: "unhandled" };
+  }
+
+  const left = childRects[0] as Rect;
+  const right = childRects[1] as Rect;
+
+  // Same visual row: tops within tolerance (align-items start/center handled
+  // later via counter align + verify).
+  if (Math.abs(left.y - right.y) > GEOMETRY_TOLERANCE * 4) {
+    // Allow larger top delta only when counter-align center/max may offset;
+    // still require vertical overlap of the two boxes.
+    const overlap =
+      Math.min(left.y + left.height, right.y + right.height) -
+      Math.max(left.y, right.y);
+    if (overlap < Math.min(left.height, right.height) * 0.5) {
+      return { ok: false, reason: "unhandled" };
+    }
+  }
+
+  // Reject if the second child clearly starts a new row (x near leading pad
+  // while y is below the first child's bottom).
+  if (
+    right.y >= left.y + left.height - GEOMETRY_TOLERANCE &&
+    right.x <= left.x + GEOMETRY_TOLERANCE
+  ) {
+    return { ok: false, reason: "unhandled" };
+  }
+
+  const gap = right.x - (left.x + left.width);
+  if (!Number.isFinite(gap) || gap < -GEOMETRY_TOLERANCE) {
+    return { ok: false, reason: "non-uniform-gap" };
+  }
+
+  let justify =
+    JUSTIFY_MAP[style.justifyContent] ?? JUSTIFY_MAP[style.justifyItems];
+  // Grid often leaves justify-content normal; track placement is start-like.
+  if (!justify) {
+    justify = "MIN";
+  }
+  const alignRaw = style.alignItems || style.alignContent;
+  const align = ALIGN_MAP[alignRaw] ?? ALIGN_MAP[style.alignItems] ?? "MIN";
+  if (!align) {
+    return { ok: false, reason: "unmapped-align" };
+  }
+
+  const cssPadLeft = edge(style.borderLeftWidth) + edge(style.paddingLeft);
+  const cssPadTop = edge(style.borderTopWidth) + edge(style.paddingTop);
+  const cssPadRight = edge(style.borderRightWidth) + edge(style.paddingRight);
+  const cssPadBottom =
+    edge(style.borderBottomWidth) + edge(style.paddingBottom);
+
+  const spec: InferredStack = {
+    stackMode: "HORIZONTAL",
+    stackSpacing: round2(gap),
+    stackPrimaryAlignItems: justify,
+    stackCounterAlignItems: align,
+    stackPrimarySizing: "FIXED",
+    stackCounterSizing: "FIXED",
+    stackHorizontalPadding: round2(cssPadLeft),
+    stackVerticalPadding: round2(cssPadTop),
+    stackPaddingRight: round2(cssPadRight),
+    stackPaddingBottom: round2(cssPadBottom),
+  };
+
+  if (!verifyGeometry(spec, parentSize, childRects)) {
+    const measured = measureFlexPaddingFromChildren(
+      childRects,
+      parentSize,
+      true
+    );
+    if (measured) {
+      spec.stackHorizontalPadding = measured.padLeft;
+      spec.stackVerticalPadding = measured.padTop;
+      spec.stackPaddingRight = measured.padRight;
+      spec.stackPaddingBottom = measured.padBottom;
+    }
+    // Counter-align may still be wrong: try MIN/CENTER/MAX if needed.
+    if (!(measured && verifyGeometry(spec, parentSize, childRects))) {
+      let verified = false;
+      for (const tryAlign of ["MIN", "CENTER", "MAX"] as const) {
+        spec.stackCounterAlignItems = tryAlign;
+        if (measured) {
+          spec.stackHorizontalPadding = measured.padLeft;
+          spec.stackVerticalPadding = measured.padTop;
+          spec.stackPaddingRight = measured.padRight;
+          spec.stackPaddingBottom = measured.padBottom;
+        } else {
+          spec.stackHorizontalPadding = round2(cssPadLeft);
+          spec.stackVerticalPadding = round2(cssPadTop);
+          spec.stackPaddingRight = round2(cssPadRight);
+          spec.stackPaddingBottom = round2(cssPadBottom);
+        }
+        if (verifyGeometry(spec, parentSize, childRects)) {
+          verified = true;
+          break;
+        }
+        // Also retry measured pads with each align
+        if (!measured) {
+          const m2 = measureFlexPaddingFromChildren(
+            childRects,
+            parentSize,
+            true
+          );
+          if (m2) {
+            spec.stackHorizontalPadding = m2.padLeft;
+            spec.stackVerticalPadding = m2.padTop;
+            spec.stackPaddingRight = m2.padRight;
+            spec.stackPaddingBottom = m2.padBottom;
+            if (verifyGeometry(spec, parentSize, childRects)) {
+              verified = true;
+              break;
+            }
+          }
+        }
+      }
+      if (!verified) {
+        return { ok: false, reason: "verify-geometry-failed" };
+      }
+    }
+  }
+
+  const elementFlow = flow.filter(isElementFlowItem);
+  applySizingModes({
+    element,
+    style,
+    spec,
+    parent: parentSize,
+    children: elementFlow,
+    childRects: elementFlow.map((child) => {
+      const i = flow.indexOf(child);
+      return childRects[i] as Rect;
+    }),
+    isRow: true,
+  });
+
+  const childOverrides = inferChildOverrides({
+    element,
+    children: elementFlow,
+    childRects: elementFlow.map((child) => {
+      const i = flow.indexOf(child);
+      return childRects[i] as Rect;
+    }),
+    parentStyle: style,
+    spec,
+    parentSize,
+    isRow: true,
+  });
+
+  // Grid 1fr / fill track: second child often expands without flex-grow.
+  maybeMarkGridFillChild({
+    children: elementFlow,
+    childRects: elementFlow.map((child) => {
+      const i = flow.indexOf(child);
+      return childRects[i] as Rect;
+    }),
+    style,
+    spec,
+    parentSize,
+    overrides: childOverrides,
+  });
+
+  return {
+    ok: true,
+    value: {
+      stack: spec,
+      childOverrides,
+    },
+  };
+}
+
+/** If template or geometry shows a fixed + fill pair, mark fill with grow=1. */
+function maybeMarkGridFillChild(options: {
+  children: ReadonlyArray<Element>;
+  childRects: ReadonlyArray<Rect>;
+  style: CSSStyleDeclaration;
+  spec: InferredStack;
+  parentSize: { width: number; height: number };
+  overrides: Map<Element, InferredChildStack>;
+}): void {
+  const { children, childRects, style, spec, parentSize, overrides } = options;
+  if (children.length !== 2) {
+    return;
+  }
+  const template = (
+    style.gridTemplateColumns ||
+    style.getPropertyValue("grid-template-columns") ||
+    ""
+  ).trim();
+  const looksFill =
+    /1fr|minmax\s*\([^)]*1fr/i.test(template) ||
+    /auto\s+\S*fr|max-content\s+\S*fr|min-content\s+\S*fr|\d+px\s+\S*fr/i.test(
+      template
+    );
+  const left = childRects[0] as Rect;
+  const right = childRects[1] as Rect;
+  const inner =
+    parentSize.width - spec.stackHorizontalPadding - spec.stackPaddingRight;
+  const expectedFill = inner - left.width - spec.stackSpacing;
+  const fills =
+    Math.abs(right.width - expectedFill) <= GEOMETRY_TOLERANCE &&
+    expectedFill > left.width * 0.5;
+  if (!(looksFill || fills)) {
+    return;
+  }
+  if (!fills) {
+    return;
+  }
+  // Only when a single grower would take all free space (Figma equal-split
+  // with one grower is full remaining width).
+  const rightEl = children[1] as Element;
+  overrides.set(rightEl, {
+    ...overrides.get(rightEl),
+    stackChildPrimaryGrow: 1,
+  });
 }
 
 /**

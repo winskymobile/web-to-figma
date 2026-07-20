@@ -660,6 +660,76 @@ describe("wrap, reverse, and grid", () => {
       stackSpacing: 14,
     });
   });
+
+  it("converts stage-head style auto 1fr grid to HORIZONTAL", async () => {
+    const changes = await convertScene(
+      `<div style="width:320px;display:grid;grid-template-columns:auto 1fr;gap:12px;align-items:start">
+        <div style="width:54px;height:54px;background:#f60"></div>
+        <div style="min-height:54px;background:#def">
+          <div style="height:24px;background:#00f"></div>
+          <div style="height:20px;margin-top:8px;background:#0af"></div>
+        </div>
+      </div>`
+    );
+    const container = byLocalId(changes, CONTAINER_LOCAL_ID);
+    expect(container).toMatchObject({
+      stackMode: "HORIZONTAL",
+      stackSpacing: 12,
+      stackCounterAlignItems: "MIN",
+    });
+    expect(container?.stackWrap).toBeUndefined();
+    // Filling track should take remaining width after badge + gap.
+    expect(
+      byLocalId(changes, CONTAINER_LOCAL_ID + 2)?.stackChildPrimaryGrow
+    ).toBe(1);
+  });
+
+  it("converts equal two-column shot-grid (one row) to HORIZONTAL", async () => {
+    // Two flow children on one grid row: single-row path (not wrap).
+    const changes = await convertScene(
+      `<div style="width:320px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start">
+        <figure style="margin:0">
+          <div style="width:100%;height:80px;background:#ccc"></div>
+          <figcaption style="display:block;margin-top:7px;height:16px">a</figcaption>
+        </figure>
+        <figure style="margin:0">
+          <div style="width:100%;height:80px;background:#bbb"></div>
+          <figcaption style="display:block;margin-top:7px;height:16px">b</figcaption>
+        </figure>
+      </div>`
+    );
+    expect(byLocalId(changes, CONTAINER_LOCAL_ID)).toMatchObject({
+      stackMode: "HORIZONTAL",
+      stackSpacing: 12,
+    });
+    expect(byLocalId(changes, CONTAINER_LOCAL_ID)?.stackWrap).toBeUndefined();
+  });
+
+  it("converts multi-row equal shot-grid to WRAP", async () => {
+    const cell =
+      '<figure style="margin:0"><div style="width:100%;height:60px;background:#ccc"></div><figcaption style="display:block;margin-top:7px;height:14px">x</figcaption></figure>';
+    const changes = await convertScene(
+      `<div style="width:320px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start">${cell.repeat(4)}</div>`
+    );
+    expect(byLocalId(changes, CONTAINER_LOCAL_ID)).toMatchObject({
+      stackMode: "HORIZONTAL",
+      stackWrap: "WRAP",
+      stackSpacing: 12,
+    });
+  });
+
+  it("converts phone-caption style flex row to HORIZONTAL", async () => {
+    const changes = await convertScene(
+      `<div style="display:flex;align-items:center;gap:6px;width:200px;height:20px">
+        <div style="width:8px;height:8px;flex:0 0 auto;background:#0c9"></div>
+        <div style="height:16px;flex:1 1 auto;background:#345"></div>
+      </div>`
+    );
+    expect(byLocalId(changes, CONTAINER_LOCAL_ID)).toMatchObject({
+      stackMode: "HORIZONTAL",
+      stackSpacing: 6,
+    });
+  });
 });
 
 describe("text inside and around stacks", () => {
