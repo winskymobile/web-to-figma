@@ -202,6 +202,69 @@ function isSingleSymbolOrEmojiText(value: string): boolean {
  * keywords like PingFang / -apple-system that Figma cannot resolve stably).
  * Explicit custom faces (Open Sans, brand @font-face, Inter body, …) stay.
  */
+
+/**
+ * One user-perceived character (letter, digit, CJK, symbol, or emoji grapheme).
+ */
+function isSingleGraphemeText(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (isSingleSymbolOrEmojiText(trimmed)) {
+    return true;
+  }
+  let graphemes: Array<string>;
+  try {
+    const segmenter = new Intl.Segmenter(undefined, {
+      granularity: "grapheme",
+    });
+    graphemes = [...segmenter.segment(trimmed)].map((s) => s.segment);
+  } catch {
+    graphemes = Array.from(trimmed);
+  }
+  return graphemes.length === 1;
+}
+
+function cssLooksCentered(value: string): boolean {
+  const v = value.trim().toLowerCase();
+  if (!v || v === "normal" || v === "stretch" || v === "auto") {
+    return false;
+  }
+  // place-items / place-content may be "center" or "center center"
+  return v.split(/\s+/).includes("center");
+}
+
+/** Self or parent expresses centering (place-items, flex/grid align, text-align). */
+function hasCenterIntent(element: Element): boolean {
+  const view = element.ownerDocument?.defaultView ?? window;
+  const check = (el: Element | null): boolean => {
+    if (!el) {
+      return false;
+    }
+    const s = view.getComputedStyle(el);
+    const placeItems = s.placeItems || s.getPropertyValue("place-items") || "";
+    const placeContent =
+      s.placeContent || s.getPropertyValue("place-content") || "";
+    if (
+      cssLooksCentered(placeItems) ||
+      cssLooksCentered(placeContent) ||
+      cssLooksCentered(s.alignItems) ||
+      cssLooksCentered(s.justifyItems) ||
+      cssLooksCentered(s.justifyContent) ||
+      cssLooksCentered(s.alignContent) ||
+      s.textAlign === "center"
+    ) {
+      return true;
+    }
+    return false;
+  };
+  if (check(element)) {
+    return true;
+  }
+  return check(element.parentElement);
+}
+
 function isSystemOrCjkStackFamily(family: string): boolean {
   const key = family.trim().toLowerCase();
   if (!key) {
@@ -389,13 +452,23 @@ export async function nodeToTextNodeChange(
 
   const widthBuffer = getWidthBuffer(fontWeight, fontSize);
 
+  // Centered single grapheme/emoji: use font-size as the text box width so
+  // Figma auto-width / AL center has an em-square footprint (not a tight
+  // measured advance that under-sizes weather icons).
+  const centerSingleGlyph =
+    isSingleGraphemeText(text) && hasCenterIntent(element);
+  const targetWidth = centerSingleGlyph
+    ? Math.max(fontSize, 1)
+    : baseWidth + widthBuffer;
+  const widthDelta = targetWidth - baseWidth;
+
   const adjustedSize = {
-    width: baseWidth + widthBuffer,
+    width: targetWidth,
     height: baseHeight,
   };
 
   const adjustedPosition = {
-    x: position.x - widthBuffer / 2,
+    x: position.x - widthDelta / 2,
     // Need this max because of browser text alignment issues
     y: Math.max(0, position.y),
   };
@@ -425,7 +498,7 @@ export async function nodeToTextNodeChange(
   // leaves lines that still overflow the Figma frame. Single-line keeps a
   // small buffer so OpenType metrics don't spuriously break a fitting line.
   const wrappingContainerWidth = isSingleLine
-    ? nodeSize.width + widthBuffer
+    ? Math.max(1, adjustedSize.width)
     : Math.max(1, nodeSize.width);
 
   const layout = processTextLayout(loadedFont.font, text, {
@@ -746,13 +819,12 @@ export async function nodeToTextNodeChange(
     textUserLayoutVersion: 4,
     textExplicitLayoutVersion: 1,
     textBidiVersion: 1,
-    // Note: we deliberately do not emit `textAutoResize`. The right value
-    // depends on whether the source DOM wrapped (`HEIGHT` — lock width,
-    // grow height) or rendered on a single line (`WIDTH_AND_HEIGHT` is
-    // safe). Emitting `WIDTH_AND_HEIGHT` unconditionally causes Figma to
-    // un-wrap multi-line text on re-derivation and clip it against the
-    // parent frame. Leaving the field unset gives Figma its default (NONE),
-    // which preserves whatever we measured.
+    // Most text omits `textAutoResize` so Figma keeps the measured box
+    // (WIDTH_AND_HEIGHT on multi-line can unwrap/clip). Lone symbol/emoji
+    // icons use Figma auto-width so the host can reflow Inter / system emoji.
+    ...(isSingleSymbolOrEmojiText(text) || centerSingleGlyph
+      ? { textAutoResize: "WIDTH_AND_HEIGHT" as const }
+      : {}),
     autoRename: true,
   };
 

@@ -654,4 +654,57 @@ describe("single-symbol Inter primary + Noto default", () => {
     expect(textChange?.fontName?.style).toBe("Black");
     expect(textChange?.fontName?.family).not.toMatch(/Black|Bold|SC Black/i);
   });
+
+  it("sets Figma auto width for lone symbol/emoji TEXT", async () => {
+    const element = mountElement(
+      `<div style="width:40px;height:40px;font-family:system-ui,sans-serif;font-size:20px">→</div>`
+    );
+    const figma = createFigmaConverter({
+      fontLoader: createStationLikeFontLoader(),
+    });
+    const result = await figma.convert({
+      element,
+      width: 40,
+      height: 40,
+    });
+    const textChange = result.document.nodeChanges.find(
+      (c) => c.type === "TEXT"
+    );
+    expect(textChange?.textAutoResize).toBe("WIDTH_AND_HEIGHT");
+  });
+
+  it("sets centered single glyph width equal to font size", async () => {
+    const element = mountElement(
+      `<div style="display:grid;place-items:center;width:42px;height:42px;font-family:system-ui,sans-serif;font-size:20px">🌧️</div>`
+    );
+    const figma = createFigmaConverter({
+      fontLoader: createStationLikeFontLoader(),
+    });
+    const result = await figma.convert({
+      element,
+      width: 42,
+      height: 42,
+    });
+    const textChange = result.document.nodeChanges.find(
+      (c) => c.type === "TEXT"
+    );
+    expect(textChange?.size?.x).toBe(20);
+    expect(textChange?.textAutoResize).toBe("WIDTH_AND_HEIGHT");
+  });
+
+  it("does not force auto width for multi-character body text", async () => {
+    const element = mountElement(
+      `<div style="width:${FRAME_WIDTH}px;height:${FRAME_HEIGHT}px;font-family:'${TEST_FONT_FAMILY}',sans-serif;font-size:16px">Hello world</div>`
+    );
+    const figma = createFigmaConverter({ fontLoader: createTestFontLoader() });
+    const result = await figma.convert({
+      element,
+      width: FRAME_WIDTH,
+      height: FRAME_HEIGHT,
+    });
+    const textChange = result.document.nodeChanges.find(
+      (c) => c.type === "TEXT"
+    );
+    expect(textChange?.textAutoResize).toBeUndefined();
+  });
 });

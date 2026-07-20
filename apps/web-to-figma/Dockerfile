@@ -36,4 +36,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD wget -qO- http://127.0.0.1/ >/dev/null || exit 1
 CMD ["nginx", "-g", "daemon off;"]
 
-# rebuild-stamp: bare-family-inter-noto 2026-07-20T14:09:09Z
+# rebuild-stamp: centered-single-glyph 2026-07-20T15:36:54Z

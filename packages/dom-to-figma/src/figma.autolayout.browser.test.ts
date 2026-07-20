@@ -5,6 +5,7 @@ import {
   TEST_FONT_FAMILY,
 } from "./__fixtures__/loaders";
 import { getTextSize } from "./converter/dom";
+import { tryInferAutoLayout } from "./converter/layout/infer";
 import type { FigmaFrameNodeChange, FigmaNodeChange } from "./converter/types";
 import type { ConverterLayout } from "./converter/walk";
 import { createFigmaConverter } from "./figma";
@@ -840,5 +841,26 @@ describe("absolute children inside stacks", () => {
       stackPositioning: "ABSOLUTE",
       verticalConstraint: "MAX",
     });
+  });
+});
+
+describe("single-child centered place-items", () => {
+  it("infers dual-axis CENTER Auto Layout for grid place-items:center", () => {
+    document.body.innerHTML = `
+      <div id="icon" style="display:grid;place-items:center;width:42px;height:42px;box-sizing:border-box">
+        <span style="font-size:20px;line-height:20px">x</span>
+      </div>
+    `;
+    const el = document.getElementById("icon") as HTMLElement;
+    const _layout = el.offsetHeight;
+    expect(_layout).toBeGreaterThan(0);
+    const r = tryInferAutoLayout(el);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.stack.stackPrimaryAlignItems).toBe("CENTER");
+      expect(r.value.stack.stackCounterAlignItems).toBe("CENTER");
+      expect(r.value.stack.stackPrimarySizing).toBe("FIXED");
+      expect(r.value.stack.stackCounterSizing).toBe("FIXED");
+    }
   });
 });

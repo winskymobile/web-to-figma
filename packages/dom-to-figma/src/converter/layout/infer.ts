@@ -205,11 +205,16 @@ export function tryInferAutoLayout(element: Element): TryInferAutoLayoutResult {
   let pathReason: LayoutInferBailReason = "unhandled";
   if (isFlex) {
     if (style.flexWrap === "nowrap") {
-      const r = inferFlexStack(input);
-      if (r.ok) {
-        inferred = r.value;
+      const centered = inferSingleChildCenteredStack(input);
+      if (centered.ok) {
+        inferred = centered.value;
       } else {
-        pathReason = r.reason;
+        const r = inferFlexStack(input);
+        if (r.ok) {
+          inferred = r.value;
+        } else {
+          pathReason = r.reason;
+        }
       }
     } else {
       const r = inferWrapStack(input, "flex");
@@ -227,24 +232,30 @@ export function tryInferAutoLayout(element: Element): TryInferAutoLayoutResult {
       pathReason = r.reason;
     }
   } else {
-    // Single-row 2-track grids (auto/1fr headers) before block/wrap.
-    const single = inferSingleRowGridStack(input);
-    if (single.ok) {
-      inferred = single.value;
+    // 1-child place-items:center icon boxes before 2-track / wrap grids.
+    const centered = inferSingleChildCenteredStack(input);
+    if (centered.ok) {
+      inferred = centered.value;
     } else {
-      const block = inferBlockStack(input);
-      if (block.ok) {
-        inferred = block.value;
+      // Single-row 2-track grids (auto/1fr headers) before block/wrap.
+      const single = inferSingleRowGridStack(input);
+      if (single.ok) {
+        inferred = single.value;
       } else {
-        const wrap = inferWrapStack(input, "grid");
-        if (wrap.ok) {
-          inferred = wrap.value;
-        } else if (single.reason !== "unhandled") {
-          pathReason = single.reason;
-        } else if (wrap.reason !== "unhandled") {
-          pathReason = wrap.reason;
+        const block = inferBlockStack(input);
+        if (block.ok) {
+          inferred = block.value;
         } else {
-          pathReason = block.reason;
+          const wrap = inferWrapStack(input, "grid");
+          if (wrap.ok) {
+            inferred = wrap.value;
+          } else if (single.reason !== "unhandled") {
+            pathReason = single.reason;
+          } else if (wrap.reason !== "unhandled") {
+            pathReason = wrap.reason;
+          } else {
+            pathReason = block.reason;
+          }
         }
       }
     }
@@ -472,6 +483,99 @@ function inferFlexStack(
  * headers) as a non-wrapping HORIZONTAL stack. Wrap simulation does not
  * model unequal track sizing, so this path must run first for grids.
  */
+
+/**
+ * One-child flex/grid icon box with center placement (place-items:center,
+ * justify/align center). Becomes a FIXED stack with dual-axis CENTER so
+ * lone emoji/symbol TEXT hugs while the host stays a centered frame.
+ */
+function inferSingleChildCenteredStack(
+  input: StackInferenceInput
+):
+  | { ok: true; value: StackInference }
+  | { ok: false; reason: LayoutInferBailReason } {
+  const { style, flow, childRects, parentSize } = input;
+  if (flow.length !== 1 || childRects.length !== 1) {
+    return { ok: false, reason: "unhandled" };
+  }
+
+  const placeItems = (
+    style.placeItems ||
+    style.getPropertyValue("place-items") ||
+    ""
+  )
+    .trim()
+    .toLowerCase();
+  const placeContent = (
+    style.placeContent ||
+    style.getPropertyValue("place-content") ||
+    ""
+  )
+    .trim()
+    .toLowerCase();
+  const alignItems = style.alignItems.trim().toLowerCase();
+  const justifyItems = style.justifyItems.trim().toLowerCase();
+  const justifyContent = style.justifyContent.trim().toLowerCase();
+  const alignContent = style.alignContent.trim().toLowerCase();
+  const tokens = [
+    ...placeItems.split(/\s+/),
+    ...placeContent.split(/\s+/),
+    alignItems,
+    justifyItems,
+    justifyContent,
+    alignContent,
+  ];
+  if (!tokens.includes("center")) {
+    return { ok: false, reason: "unmapped-align" };
+  }
+
+  const cssPadLeft = edge(style.borderLeftWidth) + edge(style.paddingLeft);
+  const cssPadTop = edge(style.borderTopWidth) + edge(style.paddingTop);
+  const cssPadRight = edge(style.borderRightWidth) + edge(style.paddingRight);
+  const cssPadBottom =
+    edge(style.borderBottomWidth) + edge(style.paddingBottom);
+
+  // Prefer horizontal stack (matches single-row grid icon cells); geometry
+  // verify will accept either axis centering for a single child.
+  const spec: InferredStack = {
+    stackMode: "HORIZONTAL",
+    stackSpacing: 0,
+    stackPrimaryAlignItems: "CENTER",
+    stackCounterAlignItems: "CENTER",
+    stackPrimarySizing: "FIXED",
+    stackCounterSizing: "FIXED",
+    stackHorizontalPadding: round2(cssPadLeft),
+    stackVerticalPadding: round2(cssPadTop),
+    stackPaddingRight: round2(cssPadRight),
+    stackPaddingBottom: round2(cssPadBottom),
+  };
+
+  if (verifyGeometry(spec, parentSize, childRects)) {
+    return { ok: true, value: { stack: spec, childOverrides: new Map() } };
+  }
+
+  // Re-measure padding from child (border-box quirks / subpixel).
+  const child = childRects[0] as Rect;
+  const padL = child.x;
+  const padT = child.y;
+  const padR = parentSize.width - (child.x + child.width);
+  const padB = parentSize.height - (child.y + child.height);
+  if (padL < -GEOMETRY_TOLERANCE || padT < -GEOMETRY_TOLERANCE) {
+    return { ok: false, reason: "verify-geometry-failed" };
+  }
+  const measured: InferredStack = {
+    ...spec,
+    stackHorizontalPadding: round2(Math.max(padL, 0)),
+    stackVerticalPadding: round2(Math.max(padT, 0)),
+    stackPaddingRight: round2(Math.max(padR, 0)),
+    stackPaddingBottom: round2(Math.max(padB, 0)),
+  };
+  if (!verifyGeometry(measured, parentSize, childRects)) {
+    return { ok: false, reason: "verify-geometry-failed" };
+  }
+  return { ok: true, value: { stack: measured, childOverrides: new Map() } };
+}
+
 function inferSingleRowGridStack(
   input: StackInferenceInput
 ):
